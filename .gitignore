@@ -1,0 +1,122 @@
+# =============================================
+# VoiceDoor - mod_voice root .gitignore
+# =============================================
+
+# -----------------------------------------------
+# Python (voice/ - voice recognition system)
+# -----------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# Python eggs / dist
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Model artifacts (besar, di-download otomatis)
+pretrained_models/
+voice/pretrained_models/
+
+# Trained model files
+voice/models/*.pkl
+voice/models/*.json
+voice/models/*.png
+!voice/models/.gitkeep
+
+# Dataset audio (data sensitif suara pengguna)
+voice/data/raw/*/
+!voice/data/raw/.gitkeep
+
+# Streamlit cache
+.streamlit/
+
+# -----------------------------------------------
+# Java / Gradle (voicedoor_mod/)
+# -----------------------------------------------
+
+# Gradle wrapper (uncomment jika mau commit wrapper)
+# !voicedoor_mod/gradle/
+# !voicedoor_mod/gradlew
+# !voicedoor_mod/gradlew.bat
+
+voicedoor_mod/.gradle/
+voicedoor_mod/build/
+voicedoor_mod/out/
+voicedoor_mod/run/
+voicedoor_mod/runs/
+voicedoor_mod/src/generated/
+
+# ForgeGradle / MDK caches
+voicedoor_mod/fg_cache/
+voicedoor_mod/.cache/
+voicedoor_mod/mcp_config/
+
+# IDE
+voicedoor_mod/.idea/
+voicedoor_mod/*.iml
+voicedoor_mod/.classpath
+voicedoor_mod/.project
+voicedoor_mod/.settings/
+voicedoor_mod/eclipse/
+voicedoor_mod/.factorypath
+
+# Local Forge / Minecraft run data
+voicedoor_mod/run/
+voicedoor_mod/logs/
+voicedoor_mod/crash-reports/
+voicedoor_mod/saves/
+voicedoor_mod/screenshots/
+voicedoor_mod/resourcepacks/
+voicedoor_mod/shaderpacks/
+
+# -----------------------------------------------
+# OS & Editor
+# -----------------------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.vscode/
+*.sublime-workspace
+*.suo
+*.user
+
+# -----------------------------------------------
+# Logs & Temp
+# -----------------------------------------------
+*.log
+*.tmp
+*.temp
+tmp/
+temp/

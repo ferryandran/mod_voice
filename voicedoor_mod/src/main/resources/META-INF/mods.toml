@@ -1,0 +1,37 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+issueTrackerURL="https://github.com/voicedoor/voicedoor/issues"
+
+[[mods]]
+    modId="voicedoor"
+    version="1.0.0"
+    displayName="VoiceDoor"
+    description='''
+        Custom door yang hanya bisa dibuka dengan suara pemilik rumah.
+        Memerlukan Simple Voice Chat mod dan Python API Server.
+    '''
+    logoFile="voicedoor.png"
+    authors="VoiceDoor Team"
+    displayURL="https://github.com/voicedoor/voicedoor"
+
+[[dependencies.voicedoor]]
+    modId="forge"
+    mandatory=true
+    versionRange="[47.3,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.voicedoor]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.20.1,1.21)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.voicedoor]]
+    modId="voicechat"
+    mandatory=false
+    versionRange="[2.5.0,)"
+    ordering="NONE"
+    side="BOTH"

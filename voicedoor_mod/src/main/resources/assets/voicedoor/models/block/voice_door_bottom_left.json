@@ -1,0 +1,7 @@
+{
+  "parent": "minecraft:block/door_bottom_left",
+  "textures": {
+    "bottom": "voicedoor:block/voice_door_bottom",
+    "top": "voicedoor:block/voice_door_top"
+  }
+}
