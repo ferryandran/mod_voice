@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Voice data (personal recordings) - keep folder structure only
+data/raw/*
+!data/raw/.gitkeep
+
+# Trained model artifacts - regenerate with `python src/train.py`
+models/*
+!models/.gitkeep
+models_*/
+
+# Pretrained model downloads (e.g. SpeechBrain / HuggingFace cache)
+pretrained_models/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
