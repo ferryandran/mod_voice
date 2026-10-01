@@ -59,17 +59,23 @@ voice/data/raw/*/
 # Streamlit cache
 .streamlit/
 
+# Token API server - JANGAN pernah di-commit
+voice/.api_token
+.api_token
+
 # -----------------------------------------------
 # Java / Gradle (voicedoor_mod/)
 # -----------------------------------------------
 
-# Gradle wrapper (uncomment jika mau commit wrapper)
-# !voicedoor_mod/gradle/
-# !voicedoor_mod/gradlew
-# !voicedoor_mod/gradlew.bat
+# Gradle wrapper SENGAJA di-commit (gradlew, gradlew.bat, gradle/wrapper/).
+# Wrapper dipin ke Gradle 8.1.1: ForgeGradle 6 tidak kompatibel dengan Gradle 9,
+# jadi tanpa wrapper orang yang clone repo ini akan gagal build memakai Gradle
+# versi apa pun yang kebetulan terpasang di mesinnya.
+# Yang diabaikan di bawah hanyalah folder cache .gradle/, bukan wrapper-nya.
 
 voicedoor_mod/.gradle/
 voicedoor_mod/build/
+voicedoor_mod/bin/
 voicedoor_mod/out/
 voicedoor_mod/run/
 voicedoor_mod/runs/
@@ -120,3 +126,7 @@ Desktop.ini
 *.temp
 tmp/
 temp/
+
+# Artefak bantu saat menguji secara lokal
+_runclient.log
+_jar_manual_backup/

@@ -1,19 +1,24 @@
 modLoader="javafml"
 loaderVersion="[47,)"
 license="MIT"
-issueTrackerURL="https://github.com/voicedoor/voicedoor/issues"
+issueTrackerURL="https://github.com/ferryandran/mod_voice/issues"
 
 [[mods]]
     modId="voicedoor"
     version="1.0.0"
     displayName="VoiceDoor"
     description='''
-        Custom door yang hanya bisa dibuka dengan suara pemilik rumah.
-        Memerlukan Simple Voice Chat mod dan Python API Server.
+        Pintu yang hanya terbuka setelah verifikasi suara pemiliknya.
+
+        Memerlukan Simple Voice Chat dan Python API server yang disertakan di folder
+        voice/ pada repositori ini. Jalankan 'python voice_api_server.py', lalu masukkan
+        token yang dicetaknya dengan '/voicedoor settoken <token>'.
+
+        Tidak perlu melatih model dan tidak perlu anggota kedua: server memakai speaker
+        verification, bukan klasifikasi antar anggota.
     '''
-    logoFile="voicedoor.png"
     authors="VoiceDoor Team"
-    displayURL="https://github.com/voicedoor/voicedoor"
+    displayURL="https://github.com/ferryandran/mod_voice"
 
 [[dependencies.voicedoor]]
     modId="forge"
@@ -29,9 +34,22 @@ issueTrackerURL="https://github.com/voicedoor/voicedoor/issues"
     ordering="NONE"
     side="BOTH"
 
+# Wajib: tanpa Simple Voice Chat pintu tidak bisa merekam suara sama sekali, jadi mod ini
+# tidak punya fungsi apa pun. Sebelumnya ditandai mandatory=false, yang membuat mod tampak
+# berjalan tapi setiap percobaan membuka pintu gagal dengan pesan yang membingungkan.
+#
+# PENTING soal format versinya. Simple Voice Chat versi Forge melaporkan dirinya sebagai
+# "1.20.1-2.6.23" - diawali versi Minecraft, bukan "2.6.23". Range "[2.5.0,)" karena itu
+# SELALU gagal: komponen pertama yang dibandingkan adalah 1 lawan 2, jadi Forge menolak
+# memuat mod dengan pesan "requires voicechat 2.5.0 or above, currently 1.20.1-2.6.23"
+# walaupun versinya jelas lebih baru. Range di bawah memakai format yang sama persis.
+#
+# Maven ComparableVersion memecah string pada '.' dan '-' lalu membandingkan token numerik
+# sebagai angka, jadi 1.20.1-2.10.0 benar dinilai lebih besar dari 1.20.1-2.5.0 (bukan
+# perbandingan string, yang akan salah menilai "2.10" < "2.5").
 [[dependencies.voicedoor]]
     modId="voicechat"
-    mandatory=false
-    versionRange="[2.5.0,)"
-    ordering="NONE"
+    mandatory=true
+    versionRange="[1.20.1-2.5.0,)"
+    ordering="AFTER"
     side="BOTH"

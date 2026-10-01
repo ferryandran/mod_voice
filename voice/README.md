@@ -1,17 +1,24 @@
-# 🏠 Home Owner Voice Recognition System
+# Voice Recognition Server
 
-Speaker recognition for a household: register family members with a few voice samples, train a classifier on pretrained **ECAPA-TDNN** speaker embeddings, and identify who is speaking from a new recording — with a confidence score and an **Unknown Voice** result for strangers.
+Komponen Python dari [VoiceDoor](../README.md). Dua peran dalam satu folder:
 
-Method: **Librosa** (audio loading, noise reduction, segmentation), **SpeechBrain ECAPA-TDNN** (192-d speaker embedding per segment), **scikit-learn** (SVM / Random Forest / MLP on top of the embeddings), **SpeechRecognition** (transcript) and **Streamlit** (web UI).
+| Jalankan ini | Untuk apa | Butuh berapa orang? |
+|---|---|---|
+| **`voice_api_server.py`** | **API yang dipakai mod Minecraft.** Speaker *verification*: "apakah ini benar Budi?" | 1 |
+| `app.py` (Streamlit) | UI eksplorasi dataset. Closed-set *identification*: "di antara anggota keluarga, ini siapa?" | minimal 2 |
+
+**Kalau kamu memasang mod Minecraft, yang kamu butuhkan adalah `voice_api_server.py`.** UI Streamlit sifatnya opsional — berguna untuk melihat dataset, membandingkan model, dan memeriksa spektrogram, tapi pintu tidak memerlukannya sama sekali.
+
+Metode: **librosa** (load, noise reduction, segmentasi) → **SpeechBrain ECAPA-TDNN** (voiceprint 192 dimensi per segmen) → **cosine similarity** terhadap voiceprint yang di-enroll. Untuk UI Streamlit, ada tambahan **scikit-learn** (SVM / Random Forest / MLP) dan **SpeechRecognition** (transkripsi).
 
 ---
 
-## 1. Installation
+## 1. Instalasi
 
-Requires **Python 3.10 – 3.13**.
+Butuh **Python 3.10 – 3.13**.
 
 ```bash
-cd voice-recognition
+cd voice
 python -m venv .venv
 
 # Windows
@@ -22,159 +29,246 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Audio formats:** WAV, MP3, FLAC and OGG are decoded by `soundfile` (bundled libsndfile). If an MP3 fails to load on your system, install [FFmpeg](https://ffmpeg.org/download.html) and add it to your `PATH` — librosa falls back to it automatically.
+**Model pretrained:** jalan pertama mengunduh checkpoint ECAPA-TDNN (~80 MB) dari HuggingFace ke `pretrained_models/`, jadi butuh internet satu kali. Setelah itu semuanya jalan offline di CPU.
 
-**Pretrained model:** the first training or prediction run downloads the ECAPA-TDNN checkpoint (~80 MB) from HuggingFace into `pretrained_models/`, so it needs an internet connection once. After that everything runs offline on the CPU.
+**Format audio:** WAV, MP3, FLAC, OGG ditangani `soundfile`. Kalau MP3 gagal, pasang [FFmpeg](https://ffmpeg.org/download.html) dan tambahkan ke `PATH` — librosa otomatis memakainya sebagai fallback.
 
-**Transcript:** uses the free Google Web Speech API through SpeechRecognition, so it needs an internet connection. When offline, the app shows a warning and everything else keeps working.
+**Versi torch:** `requirements.txt` memin `torch==2.14.0` dan `torchaudio==2.11.0`. Angka minor keduanya memang berbeda — penomoran torchaudio tidak lagi mengikuti torch, dan kombinasi ini benar. Untuk wheel CPU yang jauh lebih kecil:
+
+```bash
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+```
 
 ---
 
-## 2. Dataset preparation
+## 2. Menjalankan API server
+
+```bash
+python voice_api_server.py
+```
+
+```
+====================================================================
+VoiceDoor Voice API Server  (mode: speaker verification)
+Bind            : 127.0.0.1:5000
+Threshold       : 0.45 (client hanya boleh minta lebih ketat)
+Challenge       : wajib
+Member enrolled : (belum ada)
+--------------------------------------------------------------------
+API token: 7Kq2mX...
+Masukkan ke mod dengan: /voicedoor settoken 7Kq2mX...
+====================================================================
+```
+
+Token dibuat otomatis saat pertama jalan dan disimpan di `.api_token` (sudah di-gitignore). Jalankan `/voicedoor settoken <token>` di dalam game sekali saja.
+
+### Opsi
+
+| Opsi | Keterangan |
+|---|---|
+| `--host 0.0.0.0` | Terima koneksi dari jaringan (default hanya localhost) |
+| `--port 5000` | Port |
+| `--threshold 0.55` | Ambang cosine similarity, lebih tinggi = lebih ketat |
+| `--require-passphrase` | Pemain harus mengucapkan frasa acak. Anti-replay terkuat, **butuh internet** |
+| `--language id-ID` | Bahasa frasa dan transkripsi |
+| `--no-challenge` | Matikan challenge sekali-pakai. Tidak disarankan |
+| `--no-auth` | Matikan token. **Hanya untuk tes lokal** |
+| `--dev` | Flask dev server + debug, bukan waitress |
+
+Server menolak bind ke `0.0.0.0` kalau `--no-auth` juga dipakai — kombinasi itu berarti siapa pun di jaringan bisa mendaftarkan suaranya sebagai pemilik pintu.
+
+Secara default server dijalankan lewat **waitress**, bukan dev server Flask.
+
+---
+
+## 3. Endpoint
+
+Semua kecuali `/health` butuh header `X-VoiceDoor-Token`.
+
+| Method | Path | Fungsi |
+|---|---|---|
+| GET | `/health` | Health check, tanpa autentikasi |
+| GET | `/status` | Voiceprint terdaftar, ambang, status proteksi replay |
+| POST | `/challenge` | Terbitkan challenge sekali-pakai. Body: `member` |
+| POST | `/verify` | Verifikasi suara. Form: `audio`, `member`, `challenge_id`, `threshold?` |
+| POST | `/register` | Simpan sample lalu perbarui voiceprint. Form: `audio`, `member` |
+| POST | `/enroll` | Hitung ulang voiceprint dari sample tersimpan. Body: `member` (atau `"all"`) |
+| POST | `/train` | Latih classifier closed-set. **Hanya untuk UI Streamlit**, pintu tidak memakainya |
+
+Contoh alur lengkap dengan curl:
+
+```bash
+TOKEN=$(cat .api_token)
+
+# Daftarkan suara (ulangi 3-5 kali dengan rekaman berbeda)
+curl -H "X-VoiceDoor-Token: $TOKEN" \
+     -F "member=Budi" -F "audio=@sample1.wav" \
+     http://127.0.0.1:5000/register
+
+# Minta challenge, lalu verifikasi
+CID=$(curl -s -H "X-VoiceDoor-Token: $TOKEN" \
+       -d "member=Budi" http://127.0.0.1:5000/challenge | python -c "import sys,json;print(json.load(sys.stdin)['challenge_id'])")
+
+curl -H "X-VoiceDoor-Token: $TOKEN" \
+     -F "member=Budi" -F "challenge_id=$CID" -F "audio=@test.wav" \
+     http://127.0.0.1:5000/verify
+```
+
+---
+
+## 4. Mengkalibrasi ambang
+
+Ini bagian yang paling menentukan apakah pintunya terasa enak dipakai. Nilai default 0.45 adalah titik tengah yang aman, tapi mikrofon dan ruangan setiap orang berbeda.
+
+```bash
+# Lihat siapa saja yang sudah punya voiceprint
+python src/verify.py list
+
+# Cetak skor mentah sebuah rekaman terhadap satu member
+python src/verify.py check rekaman_budi.wav Budi
+python src/verify.py check rekaman_orang_lain.wav Budi
+```
+
+```
+Member     : Budi
+Verdict    : ACCEPTED
+Similarity : 0.7214 (threshold 0.45)
+Segments   : 3 -> 0.731, 0.698, 0.735
+```
+
+Rekam beberapa klip dirimu sendiri dan beberapa klip orang lain, lihat sebaran skornya, lalu set ambang di tengah celah antara keduanya. Nilai khas ECAPA:
+
+- orang yang sama: **0.50 – 0.85**
+- orang berbeda: **0.00 – 0.30**
+
+Kalau celahnya sempit, penyebabnya hampir selalu sample enrollment yang kurang konsisten. `enroll` mencetak angka **kohesi** — kalau di bawah 0.55, rekam ulang dalam satu sesi dengan mikrofon dan posisi yang sama.
+
+---
+
+## 5. Dataset
 
 ```
 data/raw/
-├── Dad/
-│   ├── reading_01.wav
-│   └── reading_02.wav
-├── Mom/
-│   └── ...
-└── Sarah/
+├── Budi/
+│   ├── sample_20261001_101500_a3f2c1.wav
+│   └── sample_20261001_101530_b8e491.wav
+└── Ani/
     └── ...
 ```
 
-- One folder per member; the folder name is the label shown in predictions.
-- Add samples either through the **Register Member** page (record or upload) or by copying files into the folders manually.
-- **Minimum:** 2 members, each with about **20 s of speech** after silence removal (8 segments of 2.5 s) spread over at least 2 recordings. **Recommended:** 30–60 s per member over **5 or more separate recordings** — the train/test split is grouped by recording, so 5+ files per member are needed for an honest evaluation.
-- Short clips are fine: a 2 s clip becomes 1 segment, a 6 s clip 2–3 segments. Many short clips work as well as a few long ones.
-- Unequal amounts per member (e.g. 100 clips for one, 50 for the others) are handled by the balancing step.
+Satu folder per orang; nama folder adalah label. File ditambahkan otomatis oleh `/register` dari dalam game, atau bisa dikopi manual lalu jalankan `python src/verify.py enroll <nama>`.
 
-Recording tips:
-- Natural speech (read a paragraph, talk about your day) works better than repeating one word.
-- Record in the same place and with the same microphone that will be used for identification.
-- Avoid music/TV in the background. Mild noise is handled by noise reduction and augmentation.
+**Kebutuhan minimum untuk verification:** 6 segmen (~15 detik bicara setelah silence dibuang). **Disarankan:** 30–60 detik dari 3–5 rekaman terpisah.
+
+Tips merekam:
+
+- Bicara alami (baca paragraf, cerita tentang harimu) lebih baik daripada mengulang satu kata.
+- Rekam di tempat dan dengan mikrofon yang nanti dipakai untuk membuka pintu.
+- Hindari musik atau TV di latar. Noise ringan sudah ditangani noise reduction.
+
+`data/raw/` dan `models/` sudah di-gitignore — rekaman suara adalah data biometrik dan tidak boleh ikut ter-push.
 
 ---
 
-## 3. Running the app
+## 6. UI Streamlit (opsional)
 
 ```bash
 streamlit run app.py
 ```
 
-Open http://localhost:8501.
+Buka http://localhost:8501.
 
-| Page | What it does |
-|------|--------------|
-| 🎙️ **Register Member** | Enter a name, record with the microphone or upload WAV/MP3/FLAC/OGG files. Clips are validated and saved as 16 kHz mono WAV in `data/raw/<name>/`. |
-| 🧠 **Train Model** | Encodes every segment with ECAPA, trains SVM, Random Forest and MLP, shows accuracy per model, the confusion matrix, the classification report and the selected model. |
-| 🔍 **Identify Voice** | Record or upload audio → predicted speaker, similarity %, probability chart, transcript, waveform and log-mel spectrogram. Green badge = recognized, red = unknown. |
-| 📊 **Dataset** | Samples and duration per member, delete individual samples or a whole member. |
+| Halaman | Fungsi |
+|---|---|
+| Register Member | Rekam atau unggah sample, disimpan sebagai WAV 16 kHz mono |
+| Train Model | Latih SVM / Random Forest / MLP, tampilkan akurasi dan confusion matrix |
+| Identify Voice | Prediksi siapa yang bicara, grafik probabilitas, transkrip, spektrogram |
+| Dataset | Sample dan durasi per member, hapus sample atau member |
 
-After adding or deleting members, **retrain the model**.
-
----
-
-## 4. Command-line usage
-
-Every module runs standalone (from the project root):
-
-```bash
-# Inspect preprocessing of one file (optionally save the segments)
-python src/preprocess.py data/raw/Dad/reading_01.wav --augment --out-dir segments/
-
-# Show the ECAPA embedding of one file
-python src/embeddings.py data/raw/Dad/reading_01.wav
-
-# Train (augmentation, balancing and noise reduction are on by default)
-python src/train.py
-python src/train.py --no-augment --no-balance --no-noise-reduction --test-size 0.2
-python src/train.py --overlap 0.5      # overlapping segments -> more training data
-python src/train.py --models-dir models_test   # train into a separate folder
-
-# Predict
-python src/predict.py test.wav
-python src/predict.py test.wav --threshold 0.7 --transcribe --language id-ID
-```
-
-`python -m src.train` style works as well.
+UI ini memakai classifier closed-set, jadi butuh **minimal 2 member** dan perlu dilatih ulang setiap ada perubahan anggota. Pintunya tidak.
 
 ---
 
-## 5. How it works
+## 7. Cara kerja
 
 **Preprocessing** (`src/preprocess.py`)
-1. Load with librosa at 16 kHz mono.
-2. Spectral-gating noise reduction (noise floor estimated from the quietest frames).
-3. Trim leading/trailing silence (`librosa.effects.trim`, `top_db=25`) and remove long pauses inside the clip.
-4. Peak amplitude normalization.
-5. Split into 2.5 s segments (min 1 s) → more training samples.
-6. Optional augmentation on the training split only: Gaussian noise injection (SNR 15–30 dB) and pitch shift (±0.5–1 semitone).
+1. Load lewat librosa pada 16 kHz mono.
+2. Noise reduction spectral-gating (noise floor diperkirakan dari frame terhening).
+3. Buang silence di awal/akhir (`top_db=25`) dan jeda panjang di tengah.
+4. Normalisasi amplitudo puncak.
+5. Potong jadi segmen 2,5 detik (minimal 1 detik).
 
-**Features — ECAPA embeddings** (`src/embeddings.py`) — per segment:
-- A pretrained ECAPA-TDNN model (`speechbrain/spkrec-ecapa-voxceleb`, trained on thousands of VoxCeleb speakers) maps each segment to a **192-dimensional**, L2-normalized speaker embedding.
-- Internally the model consumes an 80-band log-mel filterbank (25 ms window, 10 ms hop) and its TDNN + attentive-statistics-pooling layers compress it into a vector that describes *who* is speaking — far less sensitive to the microphone, the room and the spoken words than hand-crafted spectral averages.
-- The embedding is then standardized with `StandardScaler` and fed to the scikit-learn classifiers. Segments are encoded in batches of 16 on the CPU.
-- The Identify page shows the same log-mel spectrogram the model sees, for a visual sanity check.
-- `feature_type` and `feature_dim` are stored in `metadata.json`; loading a model trained with a different representation is refused with a "please retrain" message.
+**Voiceprint** (`src/embeddings.py`)
+- `speechbrain/spkrec-ecapa-voxceleb` memetakan setiap segmen ke vektor **192 dimensi** yang sudah di-L2-normalisasi.
+- Model melihat filterbank log-mel 80 band; lapisan TDNN + attentive statistics pooling memadatkannya menjadi vektor yang menggambarkan *siapa* yang bicara — jauh lebih tahan terhadap perbedaan mikrofon, ruangan, dan kata yang diucapkan dibanding fitur spektral buatan tangan.
 
-**Training** (`src/train.py`)
-- Stratified 80/20 split **grouped by source recording**: every segment of one file lands
-  either in train or in test, never both. Without this, segments of the same recording on
-  both sides inflate the accuracy. If a member has fewer than 5 recordings the split falls
-  back to segment level and a warning is stored in the summary.
-- Augmentation runs on the training split only.
-- Class balancing (on by default, triggered above a 1.2:1 imbalance): minority members are
-  oversampled in the training split. SVM and Random Forest use `class_weight="balanced"`,
-  but `MLPClassifier` has no such option, so without this a member with twice the data wins.
-  Duplicated rows keep the group of their source file, so CV folds stay clean.
-- 5-fold `StratifiedGroupKFold` cross-validation (augmented/duplicated copies stay in the
-  same fold as their source recording).
-- Candidates: SVM (RBF, `probability=True`), Random Forest, MLPClassifier.
-- The model with the best mean CV accuracy is saved to `models/` together with the scaler,
-  label encoder, `metadata.json` and `confusion_matrix.png`.
+**Verification** (`src/verify.py`) — inilah yang dipakai pintu
+- Enrollment: rata-ratakan semua embedding segmen seseorang, normalisasi → satu centroid.
+- Verifikasi: cosine similarity setiap segmen terhadap centroid, lalu dirata-rata, dibandingkan dengan ambang.
+- Karena vektornya sudah unit length, cosine similarity cuma dot product.
+- Disimpan di `models/enrollments.json`, ditulis atomic (temp file + rename) supaya request yang membaca tidak pernah melihat file setengah tertulis.
 
-**Prediction** (`src/predict.py`)
-- Same preprocessing → segments → features → scaler → `predict_proba`.
-- Probabilities are averaged over all segments (soft voting).
-- If the top probability is below the threshold (default **0.60**) the result is **Unknown Voice**.
+**Proteksi replay** (`src/challenge.py`)
+- Challenge sekali-pakai, kedaluwarsa 45 detik, terikat ke satu member.
+- Fingerprint SHA-256 audio yang sudah pernah berhasil, diingat 15 menit.
+- Opsional: frasa acak yang harus diucapkan, dicek lewat speech-to-text dengan pencocokan bag-of-words (transkripsi sering menjatuhkan satu kata; menuntut transkrip sempurna membuat pintunya tidak bisa dipakai).
+
+**Classifier closed-set** (`src/train.py`, `src/predict.py`) — hanya untuk UI Streamlit
+- Split 80/20 **dikelompokkan per rekaman**, jadi segmen dari satu file tidak pernah muncul di train dan test sekaligus. Tanpa ini akurasinya terlihat jauh lebih tinggi dari kenyataan.
+- Augmentasi (noise + pitch shift) hanya pada split train.
+- Class balancing dengan oversampling minoritas; baris duplikat mewarisi group file asalnya supaya CV fold tetap bersih.
+- 5-fold `StratifiedGroupKFold`, model dengan CV terbaik yang disimpan.
 
 ---
 
-## 6. Notes & troubleshooting
+## 8. Test
 
-| Problem | Fix |
-|---------|-----|
-| "At least 2 registered members…" | Register a second member. |
-| "Not enough usable speech for: …" | Add more/longer recordings for the listed members. |
-| "Model has not been trained yet" | Open **Train Model** and click **Start training**. |
-| "Saved model uses a different feature configuration" | The model predates the ECAPA-only pipeline — retrain. |
-| "Could not load the ECAPA model" | First run needs internet to download the checkpoint; check the connection or that `pretrained_models/` is writable. |
-| "ECAPA needs torch, torchaudio and speechbrain" | `pip install -r requirements.txt` (CPU wheels: `pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu`). |
-| File skipped as corrupt | Re-export it as WAV, or install FFmpeg for exotic MP3 encodings. |
-| Transcript unavailable | No internet or no recognizable words — prediction still works. |
-| Strangers recognized as a member | Raise the threshold (e.g. 0.70–0.80) and add more varied samples per member. |
-| 100% accuracy that fails in practice | Check the split label on the Train page: "segment-level (fallback)" means one member has fewer than 5 recordings. Record more separate clips. |
-| One member always wins | Keep "Balance members" on, or record more clips for the others. |
+```bash
+python -m pytest                    # 67 test
+python -m pytest -m "not slow"      # 63 test, lewati yang memuat ECAPA
+python -m pytest tests/test_api.py  # hanya endpoint HTTP
+```
 
-About the Unknown threshold: the classifier only knows registered members, so a stranger is always mapped to the *closest* member. The threshold rejects low-confidence matches, but a stranger with a similar voice can still exceed it. Tune it on the Identify page using a few recordings of non-members.
+Test yang bertanda `slow` memuat checkpoint ECAPA sungguhan dan berjalan end-to-end memakai audio sintetis. Audio itu bukan suara manusia, jadi test-nya memastikan *struktur* pipeline-nya benar (skor identik ≈ 1.0, sumber berbeda skornya lebih rendah), bukan seberapa akurat sistemnya membedakan orang nyata.
 
 ---
 
-## 7. Project structure
+## 9. Troubleshooting
+
+| Masalah | Solusi |
+|---|---|
+| `Token tidak valid` | Jalankan `/voicedoor settoken <token>`. Token ada di `.api_token` dan dicetak saat server start. |
+| `'X' belum punya voiceprint` | Jalankan `/voicedoor register` beberapa kali, atau `python src/verify.py enroll X`. |
+| `hanya menghasilkan N segmen` | Rekaman terlalu pendek atau terlalu banyak silence. Bicara lebih lama, 3–5 rekaman. |
+| `Challenge tidak dikenal atau kedaluwarsa` | Butuh lebih dari 45 detik antara klik pintu dan bicara. Coba lagi. |
+| `Rekaman ini sudah pernah dipakai` | Proteksi replay bekerja. Bicara lagi alih-alih mengirim audio yang sama. |
+| `Could not load the ECAPA model` | Jalan pertama butuh internet. Periksa koneksi dan apakah `pretrained_models/` bisa ditulis. |
+| Orang lain diterima sebagai pemilik | Naikkan ambang (0.55–0.60) dan tambah sample yang lebih bervariasi. Ukur dulu dengan `verify.py check`. |
+| Pemilik sendiri sering ditolak | Kohesi enrollment rendah. Rekam ulang dalam satu sesi, lalu `enroll` lagi. |
+| Frasa tidak pernah cocok | Transkripsi butuh internet. Tanpa itu, jangan pakai `--require-passphrase`. |
+| Terlalu banyak percobaan | Rate limit 12 per menit per member. Tunggu satu menit. |
+
+---
+
+## 10. Struktur
 
 ```
-voice-recognition/
-├── app.py              # Streamlit UI
+voice/
+├── voice_api_server.py     API HTTP yang dipakai mod Minecraft
+├── app.py                  UI Streamlit (opsional)
 ├── src/
-│   ├── __init__.py
-│   ├── preprocess.py   # load, resample, noise reduction, trim silence, segmentation, augmentation
-│   ├── embeddings.py   # pretrained ECAPA-TDNN speaker embeddings (the features)
-│   ├── train.py        # training, model comparison, evaluation, saving
-│   └── predict.py      # inference + transcription
-├── data/raw/<person_name>/*.wav
-├── models/             # model.pkl, scaler.pkl, label_encoder.pkl, metadata.json, confusion_matrix.png
-├── pretrained_models/  # downloaded ECAPA-TDNN checkpoint (git-ignored)
+│   ├── verify.py           Speaker verification + enrollment  ← dipakai pintu
+│   ├── challenge.py        Challenge sekali-pakai + deteksi replay
+│   ├── embeddings.py       Voiceprint ECAPA-TDNN
+│   ├── preprocess.py       Load, noise reduction, segmentasi, augmentasi
+│   ├── train.py            Classifier closed-set (UI Streamlit)
+│   └── predict.py          Identifikasi closed-set + transkripsi (UI Streamlit)
+├── tests/                  67 test
+├── data/raw/<nama>/*.wav   Sample suara (gitignored)
+├── models/
+│   ├── enrollments.json    Voiceprint (gitignored)
+│   └── model.pkl, ...      Artefak classifier (gitignored)
+├── pretrained_models/      Checkpoint ECAPA (gitignored)
 ├── requirements.txt
-└── README.md
+└── pytest.ini
 ```

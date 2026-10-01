@@ -73,8 +73,12 @@ def make_item_texture(filename):
     print(f"Created: {filename}")
 
 
-# Paths
-base_path = r"c:\Users\Lenovo\Documents\mod_voice\voicedoor_mod\src\main\resources\assets\voicedoor\textures"
+# Paths, relatif terhadap lokasi script ini.
+#
+# Sebelumnya di-hardcode ke c:\Users\Lenovo\Documents\... sehingga script hanya jalan di
+# satu komputer.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+base_path = os.path.join(SCRIPT_DIR, "src", "main", "resources", "assets", "voicedoor", "textures")
 block_path = os.path.join(base_path, "block")
 item_path = os.path.join(base_path, "item")
 os.makedirs(block_path, exist_ok=True)

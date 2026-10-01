@@ -1,3 +1,7 @@
+# API token yang dibuat voice_api_server.py - JANGAN pernah di-commit.
+# Siapa pun yang punya token ini bisa mendaftarkan suaranya sebagai pemilik pintu.
+.api_token
+
 # Python
 __pycache__/
 *.py[cod]

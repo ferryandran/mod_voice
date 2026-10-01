@@ -61,24 +61,56 @@ minecraft {
 sourceSets.main.resources { srcDir 'src/generated/resources' }
 
 repositories {
+    // Repo resmi Max Henkel menyediakan voicechat-api tanpa autentikasi apa pun.
+    //
+    // Versi sebelumnya juga mendaftarkan maven.pkg.github.com beserta personal access
+    // token yang ditulis langsung di file ini, dengan huruf pertamanya disamarkan sebagai
+    // escape unicode supaya lolos dari secret scanning GitHub. Blok itu dihapus: repo di
+    // bawah sudah cukup untuk voicechat-api, dan kredensial tidak pernah boleh berada di
+    // file yang di-commit. Kalau suatu saat memang perlu, taruh di
+    // ~/.gradle/gradle.properties atau variabel lingkungan, lalu baca lewat
+    // project.findProperty('namaProperti').
     maven {
-        url = "https://maven.maxhenkel.de/repository/public"
-    }
-    maven {
-        url = "https://maven.pkg.github.com/henkelmax/simple-voice-chat"
-        credentials {
-            username = "token"
-            password = "\u0067hp_1111111111111111111111111111111111111111"
+        name = 'MaxHenkel'
+        url = 'https://maven.maxhenkel.de/repository/public'
+        content {
+            includeGroup 'de.maxhenkel.voicechat'
         }
     }
+
+    // Maven Modrinth menyediakan jar mod Simple Voice Chat yang lengkap. Maven Max Henkel
+    // hanya mem-publish voicechat-api (cukup untuk compile, tapi tidak bisa dijalankan),
+    // jadi repo ini dibutuhkan untuk runClient.
+    maven {
+        name = 'Modrinth'
+        url = 'https://api.modrinth.com/maven'
+        content {
+            includeGroup 'maven.modrinth'
+        }
+    }
+
     mavenCentral()
 }
 
 dependencies {
     minecraft 'net.minecraftforge:forge:1.20.1-47.3.0'
 
-    // Simple Voice Chat API - hanya API, bukan implementasi
+    // Compile hanya terhadap API-nya. Ini sudah benar: implementasinya datang dari mod
+    // voicechat saat runtime, bukan dibundel ke jar kita.
     compileOnly(fg.deobf("de.maxhenkel.voicechat:voicechat-api:2.5.0"))
+
+    // Mod Simple Voice Chat yang lengkap, HANYA untuk runClient/runServer.
+    //
+    // Kenapa lewat Gradle dan bukan ditaruh manual di run/mods/: jar rilisnya memakai nama
+    // SRG (ter-obfuscate), sementara dev environment ini memakai mapping 'official'.
+    // Menaruhnya langsung membuat voicechat crash saat start dengan
+    //   NoSuchMethodError: net.minecraft.client.Minecraft.m_91087_()
+    // yaitu nama SRG untuk Minecraft.getInstance(). fg.deobf() meremap jar itu ke mapping
+    // official lebih dulu, sehingga bisa jalan di dev.
+    //
+    // Di Minecraft sungguhan sebaliknya: pasang jar rilis voicechat seperti biasa, karena
+    // runtime produksi memang memakai nama SRG.
+    runtimeOnly fg.deobf("maven.modrinth:simple-voice-chat:forge-1.20.1-2.6.23")
 }
 
 jar {

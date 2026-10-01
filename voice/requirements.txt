@@ -3,6 +3,7 @@
 
 # VoiceDoor API Server
 flask>=3.0.0
+waitress>=3.0.0          # production WSGI server; Flask's own is dev-only
 librosa==0.11.0
 numpy==2.1.3
 scipy==1.15.2

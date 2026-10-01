@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import warnings
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -264,12 +266,11 @@ def grouped_train_test_split(
     return train_idx, test_idx, False
 
 
-def balance_classes(
-    y: np.ndarray, groups: np.ndarray, rng: np.random.Generator
-) -> np.ndarray:
+def balance_classes(y: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     """Return row indices that oversample minority classes up to the largest class.
 
-    Duplicated rows keep the group of their source recording, so CV folds stay clean.
+    Only the indices are returned; the caller re-indexes `groups` with them so the
+    duplicated rows inherit the group of their source recording and CV folds stay clean.
     """
     counts = Counter(y.tolist())
     target = max(counts.values())
@@ -298,8 +299,8 @@ def evaluate_per_file(
     compared to real usage, where a whole recording is judged at once.
     """
     proba = model.predict_proba(X_test_scaled)
-    order = {int(c): i for i, c in enumerate(class_order)}   # model column -> class id
-    inverse = {i: int(c) for c, i in order.items()}
+    order = {int(c): i for i, c in enumerate(class_order)}   # class id -> model column
+    inverse = {i: int(c) for c, i in order.items()}          # model column -> class id
     true_labels, pred_labels, errors = [], [], []
 
     for file_id in np.unique(test_files):
@@ -317,6 +318,39 @@ def evaluate_per_file(
     accuracy = accuracy_score(true_labels, pred_labels)
     cm = confusion_matrix(true_labels, pred_labels, labels=label_ids)
     return float(accuracy), cm, errors
+
+
+def dump_atomic(obj, path: Path) -> None:
+    """joblib.dump via a temp file + rename.
+
+    Writing straight to `path` truncates it immediately, so an API request that loads
+    the model at that moment reads a half-written pickle and fails. `os.replace` swaps
+    the file in one step and is atomic on POSIX and Windows alike.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        joblib.dump(obj, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def write_json_atomic(path: Path, payload: dict) -> None:
+    """Write JSON via a temp file + rename (same reasoning as `dump_atomic`)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, default=_json_default)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def plot_confusion_matrix(cm: np.ndarray, labels: list[str], title: str, path: Path) -> Path:
@@ -400,11 +434,13 @@ def train_models(
         groups = np.concatenate([groups, np.array(aug_g)])
 
     # 5. Class balancing (train split only) ---------------------------------
-    class_counts = Counter(y_all[train_idx].tolist())
+    # Measured on the rows we are about to balance (i.e. after augmentation), so the
+    # gate and the fix always look at the same numbers.
+    class_counts = Counter(y_train.tolist())
     imbalance_ratio = max(class_counts.values()) / max(min(class_counts.values()), 1)
     if balance and imbalance_ratio > 1.2:
         rng = np.random.default_rng(RANDOM_STATE + 1)
-        extra = balance_classes(y_train, groups, rng)
+        extra = balance_classes(y_train, rng)
         if extra.size:
             X_train = np.vstack([X_train, X_train[extra]])
             y_train = np.concatenate([y_train, y_train[extra]])
@@ -468,9 +504,9 @@ def train_models(
 
     models_dir.mkdir(parents=True, exist_ok=True)
     plot_confusion_matrix(cm, class_names, f"Confusion Matrix - {best.model}", models_dir / CONFUSION_FILE)
-    joblib.dump(best_model, models_dir / MODEL_FILE)
-    joblib.dump(scaler, models_dir / SCALER_FILE)
-    joblib.dump(encoder, models_dir / ENCODER_FILE)
+    dump_atomic(best_model, models_dir / MODEL_FILE)
+    dump_atomic(scaler, models_dir / SCALER_FILE)
+    dump_atomic(encoder, models_dir / ENCODER_FILE)
 
     files_per_member = Counter(name.split("/", 1)[0] for name in dataset.files)
     result = TrainingResult(
@@ -499,8 +535,7 @@ def train_models(
         skipped_files=dataset.skipped,
         warnings=notes,
     )
-    with open(models_dir / METADATA_FILE, "w", encoding="utf-8") as fh:
-        json.dump(result.to_metadata(), fh, indent=2, default=_json_default)
+    write_json_atomic(models_dir / METADATA_FILE, result.to_metadata())
 
     _notify(cb, 1.0, "Training complete.")
     return result

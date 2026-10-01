@@ -1,16 +1,16 @@
 package com.voicedoor.blockentity;
 
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import com.voicedoor.VoiceDoorMod;
-import com.voicedoor.block.ModBlocks;
+import com.voicedoor.api.VoiceApiClient;
 import com.voicedoor.block.VoiceDoorBlock;
+import com.voicedoor.config.VoiceDoorConfig;
 import com.voicedoor.network.ModNetwork;
-import com.voicedoor.network.S2COpenDoorPacket;
 import com.voicedoor.network.S2CStatusPacket;
-import com.voicedoor.voice.VoiceRecordingSession;
+import com.voicedoor.voice.VoiceChatPlugin;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.Connection;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
@@ -19,60 +19,48 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraftforge.network.PacketDistributor;
 import org.jetbrains.annotations.Nullable;
 
-import java.io.*;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 
 /**
- * Block Entity untuk VoiceDoor.
+ * Block entity VoiceDoor: menyimpan pemilik pintu dan menjalankan alur verifikasi.
  *
- * Menyimpan:
- * - ownerUUID: UUID pemilik pintu
- * - ownerName: Nama pemilik (sebagai label di Python API)
- * - authorizedPlayers: Daftar UUID pemain yang boleh masuk
- * - apiUrl: URL Python API server (bisa di-konfigurasi per pintu)
- * - isLocked: Apakah pintu sedang terkunci
- * - openTicks: Berapa tick pintu masih terbuka
+ * <p>Alur satu percobaan buka pintu:
+ * <ol>
+ *   <li>Pemain mengklik pintu. Cooldown dicek.</li>
+ *   <li>Server meminta challenge sekali-pakai dari Python API ({@code POST /challenge}).</li>
+ *   <li>Sesi rekaman dimulai lewat Simple Voice Chat, terikat ke pintu ini dan challenge itu.</li>
+ *   <li>Setelah audio terkumpul, dikirim ke {@code POST /verify} bersama challenge-nya.</li>
+ *   <li>Kalau diterima, pintu terbuka selama {@code autoCloseSeconds}.</li>
+ * </ol>
  *
- * Alur verifikasi:
- * 1. Pemain klik pintu -> handlePlayerInteraction()
- * 2. Server meminta Simple Voice Chat plugin untuk merekam suara pemain
- * 3. Audio dikirim ke Python API /verify
- * 4. Jika is_owner=true, pintu terbuka selama AUTO_CLOSE_TICKS
+ * <p>Challenge di langkah 2 yang mencegah rekaman suara pemilik dipakai ulang: audio tanpa
+ * challenge yang valid dan belum terpakai akan ditolak server.
+ *
+ * <p>Yang disimpan ke NBT: pemilik, daftar pemain berizin, override URL API, dan
+ * <b>sisa waktu pintu terbuka</b>. Yang terakhir dulunya hanya ada di memori, sehingga
+ * pintu yang terbuka lalu chunk-nya di-unload akan tetap terbuka selamanya - auto-close
+ * tidak pernah berjalan lagi setelah chunk dimuat ulang.
  */
 public class VoiceDoorBlockEntity extends BlockEntity {
 
-    // Konfigurasi
-    public static final String DEFAULT_API_URL = "http://127.0.0.1:5000";
-    public static final int AUTO_CLOSE_TICKS = 100; // ~5 detik
-    public static final int VERIFY_COOLDOWN_TICKS = 40; // 2 detik antar verifikasi
-    public static final int RECORDING_DURATION_MS = 3000; // 3 detik rekaman
-
-    // Data yang disimpan di NBT
+    // Data tersimpan
     private UUID ownerUUID = null;
     private String ownerName = "";
     private final Set<UUID> authorizedPlayers = new HashSet<>();
-    private String apiUrl = DEFAULT_API_URL;
-    private boolean isRegistering = false;
-    private String registeringForName = "";
-
-    // State runtime (tidak disimpan ke NBT)
+    /** Override URL API khusus pintu ini. Kosong berarti memakai config server. */
+    private String apiUrlOverride = "";
     private int openTicks = 0;
-    private boolean isOpen = false;
-    private final Map<UUID, Integer> verificationCooldowns = new HashMap<>();
 
-    // Thread pool untuk request HTTP asinkron
-    private static final ExecutorService HTTP_EXECUTOR = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "VoiceDoor-HTTP");
-        t.setDaemon(true);
-        return t;
-    });
+    // State runtime
+    private final Map<UUID, Integer> verificationCooldowns = new HashMap<>();
 
     public VoiceDoorBlockEntity(BlockPos pos, BlockState state) {
         super(ModBlockEntities.VOICE_DOOR.get(), pos, state);
@@ -84,17 +72,23 @@ public class VoiceDoorBlockEntity extends BlockEntity {
     public static void tick(Level level, BlockPos pos, BlockState state, VoiceDoorBlockEntity be) {
         if (level.isClientSide) return;
 
-        // Auto-close pintu
-        if (be.isOpen && be.openTicks > 0) {
+        if (be.openTicks > 0) {
             be.openTicks--;
-            if (be.openTicks <= 0) {
-                be.closeDoor(level, pos, state);
+            if (be.openTicks == 0) {
+                be.closeDoor(level, pos);
+                be.setChanged();
             }
         }
 
-        // Kurangi cooldown verifikasi
-        be.verificationCooldowns.replaceAll((uuid, ticks) -> ticks - 1);
-        be.verificationCooldowns.entrySet().removeIf(e -> e.getValue() <= 0);
+        // Map cooldown biasanya kosong; lewati supaya tidak mengalokasikan iterator
+        // 20x per detik per pintu tanpa ada yang dikerjakan.
+        if (!be.verificationCooldowns.isEmpty()) {
+            be.verificationCooldowns.entrySet().removeIf(entry -> {
+                int remaining = entry.getValue() - 1;
+                entry.setValue(remaining);
+                return remaining <= 0;
+            });
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -103,249 +97,261 @@ public class VoiceDoorBlockEntity extends BlockEntity {
     public void handlePlayerInteraction(ServerPlayer player, BlockPos pos, Level level) {
         UUID playerUUID = player.getUUID();
 
-        // Cek cooldown
-        if (verificationCooldowns.containsKey(playerUUID)) {
-            player.sendSystemMessage(Component.literal(
-                    "§e[VoiceDoor] Tunggu sebentar sebelum mencoba lagi..."));
+        if (ownerUUID == null || ownerName.isEmpty()) {
+            player.sendSystemMessage(Component.translatable("message.voicedoor.no_owner"));
             return;
         }
 
-        // Jika belum ada pemilik, pemain pertama yang klik jadi pemilik sementara
-        if (ownerUUID == null) {
-            player.sendSystemMessage(Component.literal(
-                    "§6[VoiceDoor] Pintu belum punya pemilik! Gunakan: §e/voicedoor register §6untuk mendaftarkan suaramu."));
+        Integer cooldown = verificationCooldowns.get(playerUUID);
+        if (cooldown != null && cooldown > 0) {
+            player.sendSystemMessage(Component.translatable(
+                    "message.voicedoor.cooldown", Math.max(1, cooldown / 20)));
             return;
         }
 
-        // Set cooldown
-        verificationCooldowns.put(playerUUID, VERIFY_COOLDOWN_TICKS);
+        if (!VoiceDoorMod.VOICE_CHAT_AVAILABLE) {
+            player.sendSystemMessage(Component.translatable("message.voicedoor.no_voicechat"));
+            return;
+        }
 
-        player.sendSystemMessage(Component.literal(
-                "§b[VoiceDoor] Memverifikasi suara... Bicaralah ke mikrofon!"));
+        if (VoiceChatPlugin.hasActiveSession(playerUUID)) {
+            player.sendSystemMessage(Component.translatable("message.voicedoor.session_busy"));
+            return;
+        }
 
-        // Mulai sesi verifikasi suara
-        if (VoiceDoorMod.VOICE_CHAT_AVAILABLE) {
-            // Mulai rekaman via Simple Voice Chat
-            VoiceRecordingSession.startVerification(player, this, pos, level);
+        verificationCooldowns.put(playerUUID, VoiceDoorConfig.cooldownTicks());
+
+        if (!VoiceDoorConfig.requireChallenge()) {
+            // Server API dijalankan dengan --no-challenge: rekam langsung.
+            beginRecording(player, pos, level, "", "");
+            return;
+        }
+
+        requestChallengeThenRecord(player, pos, level);
+    }
+
+    /**
+     * Minta challenge sekali-pakai, lalu mulai merekam.
+     *
+     * <p>Rekaman sengaja baru dimulai setelah server menjawab: kalau direkam lebih dulu
+     * dan challenge gagal, pemain sudah berbicara untuk apa-apa.
+     */
+    private void requestChallengeThenRecord(ServerPlayer player, BlockPos pos, Level level) {
+        String member = ownerName;
+        boolean queued = VoiceApiClient.tryPostJsonAsync(
+                "/challenge",
+                "{\"member\":\"" + escapeJson(member) + "\"}",
+                response -> runOnServer(level, () -> {
+                    if (!player.isAlive() || player.hasDisconnected()) return;
+
+                    if (!response.isSuccess()) {
+                        player.sendSystemMessage(Component.translatable(
+                                "message.voicedoor.challenge_failed", response.errorMessage()));
+                        return;
+                    }
+                    String challengeId = response.optString("challenge_id", "");
+                    if (challengeId.isEmpty()) {
+                        player.sendSystemMessage(Component.translatable(
+                                "message.voicedoor.challenge_failed", "challenge_id kosong"));
+                        return;
+                    }
+                    String phrase = response.optBoolean("require_passphrase", false)
+                            ? response.optString("phrase", "")
+                            : "";
+                    beginRecording(player, pos, level, challengeId, phrase);
+                }));
+
+        if (!queued) {
+            player.sendSystemMessage(Component.translatable("message.voicedoor.server_busy"));
+            verificationCooldowns.remove(player.getUUID());
+        }
+    }
+
+    private void beginRecording(ServerPlayer player, BlockPos pos, Level level,
+                                String challengeId, String phrase) {
+        VoiceChatPlugin.startSession(player, level, pos, false, challengeId);
+
+        if (phrase.isEmpty()) {
+            player.sendSystemMessage(Component.translatable(
+                    "message.voicedoor.speak_now", VoiceDoorConfig.recordingSeconds()));
         } else {
-            player.sendSystemMessage(Component.literal(
-                    "§c[VoiceDoor] Simple Voice Chat tidak terinstall! Tidak bisa memverifikasi suara."));
+            player.sendSystemMessage(Component.translatable(
+                    "message.voicedoor.speak_phrase", phrase, VoiceDoorConfig.recordingSeconds()));
         }
+        ModNetwork.sendTo(player, S2CStatusPacket.recordingStart(phrase, VoiceDoorConfig.recordingSeconds()));
     }
 
-    /**
-     * Dipanggil setelah rekaman suara selesai (dari VoiceRecordingSession).
-     * Mengirim audio ke Python API dan membuka pintu jika terverifikasi.
-     */
-    public void onVoiceRecorded(ServerPlayer player, byte[] audioData, Level level, BlockPos pos) {
-        String expectedSpeaker = ownerName;
-        String apiUrl = this.apiUrl;
-        BlockPos doorPos = pos;
+    // -----------------------------------------------------------------------
+    // Callback setelah rekaman selesai
+    // -----------------------------------------------------------------------
+    /** Kirim audio ke {@code /verify} dan buka pintu kalau server menerimanya. */
+    public void onVoiceRecorded(ServerPlayer player, byte[] wavBytes, Level level, BlockPos doorPos,
+                                String challengeId) {
+        ModNetwork.sendTo(player, S2CStatusPacket.recordingStop());
+        player.sendSystemMessage(Component.translatable("message.voicedoor.verifying"));
 
-        HTTP_EXECUTOR.submit(() -> {
-            try {
-                String boundary = UUID.randomUUID().toString().replace("-", "");
-                String apiEndpoint = apiUrl + "/verify";
+        VoiceApiClient.MultipartBody body = new VoiceApiClient.MultipartBody()
+                .field("member", ownerName)
+                .field("expected_speaker", ownerName)  // nama lama, untuk server versi sebelumnya
+                .field("threshold", String.format(java.util.Locale.ROOT, "%.4f", VoiceDoorConfig.threshold()));
+        if (!challengeId.isEmpty()) {
+            body.field("challenge_id", challengeId);
+        }
+        body.file("audio", "voice.wav", "audio/wav", wavBytes);
 
-                HttpURLConnection conn = (HttpURLConnection) new URL(apiEndpoint).openConnection();
-                conn.setRequestMethod("POST");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(10000);
-                conn.setDoOutput(true);
-                conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        boolean queued = VoiceApiClient.tryPostFormAsync("/verify", body, response -> runOnServer(level, () -> {
+            if (!player.isAlive() || player.hasDisconnected()) return;
 
-                // Build multipart body
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                PrintStream ps = new PrintStream(baos);
+            boolean accepted = response.isSuccess() && response.optBoolean("accepted",
+                    response.optBoolean("is_owner", false));
+            double similarity = response.optDouble("similarity", response.optDouble("confidence", 0.0));
 
-                // Field: expected_speaker
-                ps.print("--" + boundary + "\r\n");
-                ps.print("Content-Disposition: form-data; name=\"expected_speaker\"\r\n\r\n");
-                ps.print(expectedSpeaker + "\r\n");
-
-                // Field: threshold
-                ps.print("--" + boundary + "\r\n");
-                ps.print("Content-Disposition: form-data; name=\"threshold\"\r\n\r\n");
-                ps.print("0.60\r\n");
-
-                // File: audio
-                ps.print("--" + boundary + "\r\n");
-                ps.print("Content-Disposition: form-data; name=\"audio\"; filename=\"voice.wav\"\r\n");
-                ps.print("Content-Type: audio/wav\r\n\r\n");
-                ps.flush();
-                baos.write(audioData);
-                ps.print("\r\n--" + boundary + "--\r\n");
-                ps.flush();
-
-                byte[] body = baos.toByteArray();
-                conn.setRequestProperty("Content-Length", String.valueOf(body.length));
-                conn.getOutputStream().write(body);
-
-                int responseCode = conn.getResponseCode();
-                InputStream responseStream = (responseCode >= 200 && responseCode < 300)
-                        ? conn.getInputStream() : conn.getErrorStream();
-
-                String responseText = new String(responseStream.readAllBytes(), StandardCharsets.UTF_8);
-                JsonObject json = JsonParser.parseString(responseText).getAsJsonObject();
-
-                boolean success = json.get("success").getAsBoolean();
-                boolean isOwner = success && json.has("is_owner") && json.get("is_owner").getAsBoolean();
-                String speakerName = success && json.has("speaker") ? json.get("speaker").getAsString() : "Unknown";
-                double confidence = success && json.has("confidence") ? json.get("confidence").getAsDouble() : 0.0;
-
-                // Kembali ke main thread server
-                if (level instanceof ServerLevel serverLevel) {
-                    serverLevel.getServer().execute(() -> {
-                        if (isOwner) {
-                            player.sendSystemMessage(Component.literal(
-                                    String.format("§a[VoiceDoor] ✓ Suara dikenali: §e%s §a(%.0f%% keyakinan). Pintu terbuka!",
-                                            speakerName, confidence * 100)));
-                            openDoor(level, doorPos, level.getBlockState(doorPos));
-                        } else {
-                            String reason = success
-                                    ? String.format("§c%.0f%% keyakinan (terlalu rendah)", confidence * 100)
-                                    : json.has("error") ? "§c" + json.get("error").getAsString() : "§cVerifikasi gagal";
-                            player.sendSystemMessage(Component.literal(
-                                    "§c[VoiceDoor] ✗ Akses ditolak. " + reason));
-                        }
-                    });
-                }
-
-            } catch (Exception e) {
-                VoiceDoorMod.LOGGER.error("[VoiceDoor] Gagal menghubungi API server: {}", e.getMessage());
-                if (level instanceof ServerLevel serverLevel) {
-                    serverLevel.getServer().execute(() -> {
-                        player.sendSystemMessage(Component.literal(
-                                "§c[VoiceDoor] Tidak bisa terhubung ke server pengenal suara. " +
-                                "Pastikan Python API berjalan di: " + apiUrl));
-                    });
-                }
+            if (VoiceDoorConfig.logVerificationDetails()) {
+                VoiceDoorMod.LOGGER.info(
+                        "[VoiceDoor] {} di {} -> accepted={} similarity={} status={}",
+                        player.getName().getString(), doorPos.toShortString(),
+                        accepted, String.format(java.util.Locale.ROOT, "%.4f", similarity),
+                        response.statusCode());
             }
-        });
-    }
 
-    /**
-     * Kirim audio ke API server untuk mendaftarkan suara (saat /voicedoor register).
-     */
-    public void onVoiceRegistered(ServerPlayer player, byte[] audioData, Level level, BlockPos pos) {
-        String memberName = registeringForName.isEmpty() ? player.getName().getString() : registeringForName;
-        String apiUrl = this.apiUrl;
-
-        HTTP_EXECUTOR.submit(() -> {
-            try {
-                String boundary = UUID.randomUUID().toString().replace("-", "");
-                HttpURLConnection conn = (HttpURLConnection) new URL(apiUrl + "/register").openConnection();
-                conn.setRequestMethod("POST");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(10000);
-                conn.setDoOutput(true);
-                conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                PrintStream ps = new PrintStream(baos);
-
-                ps.print("--" + boundary + "\r\n");
-                ps.print("Content-Disposition: form-data; name=\"member\"\r\n\r\n");
-                ps.print(memberName + "\r\n");
-
-                ps.print("--" + boundary + "\r\n");
-                ps.print("Content-Disposition: form-data; name=\"audio\"; filename=\"voice.wav\"\r\n");
-                ps.print("Content-Type: audio/wav\r\n\r\n");
-                ps.flush();
-                baos.write(audioData);
-                ps.print("\r\n--" + boundary + "--\r\n");
-                ps.flush();
-
-                byte[] body = baos.toByteArray();
-                conn.setRequestProperty("Content-Length", String.valueOf(body.length));
-                conn.getOutputStream().write(body);
-
-                int responseCode = conn.getResponseCode();
-                String responseText = new String(
-                        (responseCode >= 200 ? conn.getInputStream() : conn.getErrorStream()).readAllBytes(),
-                        StandardCharsets.UTF_8);
-                JsonObject json = JsonParser.parseString(responseText).getAsJsonObject();
-                boolean success = json.get("success").getAsBoolean();
-
-                if (level instanceof ServerLevel serverLevel) {
-                    serverLevel.getServer().execute(() -> {
-                        if (success) {
-                            double duration = json.get("duration").getAsDouble();
-                            player.sendSystemMessage(Component.literal(
-                                    String.format("§a[VoiceDoor] ✓ Sample suara (%.1f detik) tersimpan untuk: §e%s",
-                                            duration, memberName)));
-
-                            // Set owner jika belum ada
-                            if (ownerUUID == null) {
-                                ownerUUID = player.getUUID();
-                                ownerName = memberName;
-                                setChanged();
-                                player.sendSystemMessage(Component.literal(
-                                        "§6[VoiceDoor] Kamu sekarang jadi pemilik pintu ini!"));
-                            }
-                        } else {
-                            String error = json.has("error") ? json.get("error").getAsString() : "Unknown error";
-                            player.sendSystemMessage(Component.literal(
-                                    "§c[VoiceDoor] Gagal menyimpan sample: " + error));
-                        }
-                        isRegistering = false;
-                    });
-                }
-
-            } catch (Exception e) {
-                VoiceDoorMod.LOGGER.error("[VoiceDoor] Gagal mendaftarkan suara: {}", e.getMessage());
-                if (level instanceof ServerLevel serverLevel) {
-                    serverLevel.getServer().execute(() -> {
-                        player.sendSystemMessage(Component.literal(
-                                "§c[VoiceDoor] Tidak bisa terhubung ke API server: " + e.getMessage()));
-                        isRegistering = false;
-                    });
-                }
+            if (accepted) {
+                player.sendSystemMessage(Component.translatable(
+                        "message.voicedoor.accepted",
+                        response.optString("member", ownerName),
+                        String.format(java.util.Locale.ROOT, "%.0f", similarity * 100)));
+                ModNetwork.sendTo(player, S2CStatusPacket.verificationOk(similarity));
+                openDoor(level, doorPos);
+            } else {
+                String reason = response.isSuccess()
+                        ? Component.translatable("message.voicedoor.reason_low_score",
+                                String.format(java.util.Locale.ROOT, "%.0f", similarity * 100),
+                                String.format(java.util.Locale.ROOT, "%.0f", VoiceDoorConfig.threshold() * 100))
+                            .getString()
+                        : response.errorMessage();
+                player.sendSystemMessage(Component.translatable("message.voicedoor.rejected", reason));
+                ModNetwork.sendTo(player, S2CStatusPacket.verificationFail(reason));
             }
-        });
-    }
+        }));
 
-    // -----------------------------------------------------------------------
-    // Buka / Tutup pintu
-    // -----------------------------------------------------------------------
-    private void openDoor(Level level, BlockPos pos, BlockState state) {
-        if (level.getBlockState(pos).getBlock() instanceof VoiceDoorBlock doorBlock) {
-            doorBlock.setOpen(null, level, state, pos, true);
-            isOpen = true;
-            openTicks = AUTO_CLOSE_TICKS;
+        if (!queued) {
+            player.sendSystemMessage(Component.translatable("message.voicedoor.server_busy"));
         }
     }
 
-    private void closeDoor(Level level, BlockPos pos, BlockState state) {
-        BlockState currentState = level.getBlockState(pos);
-        if (currentState.getBlock() instanceof VoiceDoorBlock doorBlock) {
-            doorBlock.setOpen(null, level, currentState, pos, false);
-            isOpen = false;
+    /** Kirim audio ke {@code /register} untuk mendaftarkan atau memperkuat voiceprint. */
+    public void onVoiceRegistered(ServerPlayer player, byte[] wavBytes, Level level, BlockPos doorPos,
+                                  String memberName) {
+        ModNetwork.sendTo(player, S2CStatusPacket.recordingStop());
+
+        String member = memberName.isEmpty() ? player.getName().getString() : memberName;
+        VoiceApiClient.MultipartBody body = new VoiceApiClient.MultipartBody()
+                .field("member", member)
+                .file("audio", "voice.wav", "audio/wav", wavBytes);
+
+        boolean queued = VoiceApiClient.tryPostFormAsync("/register", body, response -> runOnServer(level, () -> {
+            if (!player.isAlive() || player.hasDisconnected()) return;
+
+            if (!response.isSuccess()) {
+                player.sendSystemMessage(Component.translatable(
+                        "message.voicedoor.register_failed", response.errorMessage()));
+                return;
+            }
+
+            double duration = response.optDouble("duration", 0.0);
+            int samples = (int) response.optDouble("n_samples", 0);
+            player.sendSystemMessage(Component.translatable(
+                    "message.voicedoor.sample_saved",
+                    String.format(java.util.Locale.ROOT, "%.1f", duration), member, samples));
+
+            boolean enrolled = response.optBoolean("enrolled", false);
+            String hint = response.optString("hint", "");
+            if (enrolled) {
+                player.sendSystemMessage(Component.translatable("message.voicedoor.enrolled", member));
+            } else if (!hint.isEmpty()) {
+                player.sendSystemMessage(Component.translatable("message.voicedoor.enroll_pending", hint));
+            }
+            if (enrolled && !hint.isEmpty()) {
+                player.sendSystemMessage(Component.translatable("message.voicedoor.enroll_hint", hint));
+            }
+
+            // Pemain pertama yang berhasil mendaftar menjadi pemilik pintu ini.
+            if (ownerUUID == null && enrolled) {
+                setOwner(player.getUUID(), member);
+                player.sendSystemMessage(Component.translatable("message.voicedoor.now_owner"));
+            }
+        }));
+
+        if (!queued) {
+            player.sendSystemMessage(Component.translatable("message.voicedoor.server_busy"));
+        }
+    }
+
+    /** Jalankan aksi di main thread server. Dipanggil dari thread HTTP. */
+    private static void runOnServer(Level level, Runnable action) {
+        if (level instanceof ServerLevel serverLevel) {
+            serverLevel.getServer().execute(action);
         }
     }
 
     // -----------------------------------------------------------------------
-    // Getters / Setters
+    // Buka / tutup
     // -----------------------------------------------------------------------
-    public UUID getOwnerUUID() { return ownerUUID; }
-    public String getOwnerName() { return ownerName; }
-    public String getApiUrl() { return apiUrl; }
-    public boolean isRegistering() { return isRegistering; }
-    public String getRegisteringForName() { return registeringForName; }
+    private void openDoor(Level level, BlockPos pos) {
+        BlockState state = level.getBlockState(pos);
+        if (state.getBlock() instanceof VoiceDoorBlock door) {
+            door.setOpen(null, level, state, pos, true);
+            openTicks = VoiceDoorConfig.autoCloseTicks();
+            setChanged();
+        }
+    }
 
-    public void setOwner(UUID uuid, String name) {
-        this.ownerUUID = uuid;
-        this.ownerName = name;
+    private void closeDoor(Level level, BlockPos pos) {
+        BlockState state = level.getBlockState(pos);
+        if (state.getBlock() instanceof VoiceDoorBlock door && state.getValue(VoiceDoorBlock.OPEN)) {
+            door.setOpen(null, level, state, pos, false);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Getter / setter
+    // -----------------------------------------------------------------------
+    @Nullable
+    public UUID getOwnerUUID() {
+        return ownerUUID;
+    }
+
+    public String getOwnerName() {
+        return ownerName;
+    }
+
+    public boolean hasOwner() {
+        return ownerUUID != null && !ownerName.isEmpty();
+    }
+
+    /** URL efektif: override pintu ini kalau ada, kalau tidak config server. */
+    public String getApiUrl() {
+        return apiUrlOverride.isEmpty() ? VoiceDoorConfig.apiUrl() : apiUrlOverride;
+    }
+
+    public boolean hasApiUrlOverride() {
+        return !apiUrlOverride.isEmpty();
+    }
+
+    public void setApiUrlOverride(String url) {
+        this.apiUrlOverride = url == null ? "" : url.trim();
         setChanged();
     }
 
-    public void startRegistering(String name) {
-        this.isRegistering = true;
-        this.registeringForName = name;
+    public void setOwner(@Nullable UUID uuid, String name) {
+        this.ownerUUID = uuid;
+        this.ownerName = name == null ? "" : name;
+        setChanged();
     }
 
-    public void setApiUrl(String url) {
-        this.apiUrl = url;
+    public void clearOwner() {
+        this.ownerUUID = null;
+        this.ownerName = "";
+        this.authorizedPlayers.clear();
         setChanged();
     }
 
@@ -354,54 +360,106 @@ public class VoiceDoorBlockEntity extends BlockEntity {
         setChanged();
     }
 
+    public boolean removeAuthorizedPlayer(UUID uuid) {
+        boolean removed = authorizedPlayers.remove(uuid);
+        if (removed) setChanged();
+        return removed;
+    }
+
+    public Set<UUID> getAuthorizedPlayers() {
+        return Set.copyOf(authorizedPlayers);
+    }
+
+    /**
+     * Apakah {@code uuid} termasuk pemilik atau pemain berizin.
+     *
+     * <p>Ini TIDAK melewati verifikasi suara - daftar izin menentukan siapa yang boleh
+     * mencoba membuka pintu dengan suaranya sendiri, bukan siapa yang boleh masuk tanpa
+     * bicara. Pintu tetap selalu meminta verifikasi.
+     */
     public boolean isAuthorized(UUID uuid) {
         return uuid.equals(ownerUUID) || authorizedPlayers.contains(uuid);
     }
 
+    public boolean isOpen() {
+        return openTicks > 0;
+    }
+
+    public int getRemainingOpenTicks() {
+        return openTicks;
+    }
+
     // -----------------------------------------------------------------------
-    // NBT Serialization
+    // NBT
     // -----------------------------------------------------------------------
     @Override
-    public void saveAdditional(CompoundTag tag) {
+    protected void saveAdditional(CompoundTag tag) {
         super.saveAdditional(tag);
         if (ownerUUID != null) {
             tag.putUUID("OwnerUUID", ownerUUID);
-            tag.putString("OwnerName", ownerName);
         }
-        tag.putString("ApiUrl", apiUrl);
+        tag.putString("OwnerName", ownerName);
+        tag.putString("ApiUrlOverride", apiUrlOverride);
+        // Disimpan supaya auto-close tetap berjalan setelah chunk dimuat ulang.
+        tag.putInt("OpenTicks", openTicks);
 
-        // Simpan authorized players
-        CompoundTag authTag = new CompoundTag();
-        int i = 0;
+        ListTag list = new ListTag();
         for (UUID uuid : authorizedPlayers) {
-            authTag.putUUID("auth_" + i, uuid);
-            i++;
+            CompoundTag entry = new CompoundTag();
+            entry.putUUID("Id", uuid);
+            list.add(entry);
         }
-        authTag.putInt("count", i);
-        tag.put("AuthorizedPlayers", authTag);
+        tag.put("Authorized", list);
     }
 
     @Override
     public void load(CompoundTag tag) {
         super.load(tag);
-        if (tag.hasUUID("OwnerUUID")) {
-            ownerUUID = tag.getUUID("OwnerUUID");
-            ownerName = tag.getString("OwnerName");
-        }
-        if (tag.contains("ApiUrl")) {
-            apiUrl = tag.getString("ApiUrl");
-        }
+        ownerUUID = tag.hasUUID("OwnerUUID") ? tag.getUUID("OwnerUUID") : null;
+        ownerName = tag.getString("OwnerName");
+        apiUrlOverride = tag.getString("ApiUrlOverride");
+        openTicks = tag.getInt("OpenTicks");
 
-        // Load authorized players
-        if (tag.contains("AuthorizedPlayers")) {
-            CompoundTag authTag = tag.getCompound("AuthorizedPlayers");
-            int count = authTag.getInt("count");
+        authorizedPlayers.clear();
+        if (tag.contains("Authorized", Tag.TAG_LIST)) {
+            ListTag list = tag.getList("Authorized", Tag.TAG_COMPOUND);
+            for (int i = 0; i < list.size(); i++) {
+                CompoundTag entry = list.getCompound(i);
+                if (entry.hasUUID("Id")) {
+                    authorizedPlayers.add(entry.getUUID("Id"));
+                }
+            }
+        } else if (tag.contains("AuthorizedPlayers", Tag.TAG_COMPOUND)) {
+            // Format lama: CompoundTag dengan auth_0..auth_N dan sebuah "count".
+            CompoundTag legacy = tag.getCompound("AuthorizedPlayers");
+            int count = legacy.getInt("count");
             for (int i = 0; i < count; i++) {
-                if (authTag.hasUUID("auth_" + i)) {
-                    authorizedPlayers.add(authTag.getUUID("auth_" + i));
+                if (legacy.hasUUID("auth_" + i)) {
+                    authorizedPlayers.add(legacy.getUUID("auth_" + i));
                 }
             }
         }
+
+        // Migrasi dari versi yang menyimpan URL penuh dengan kunci lama.
+        if (apiUrlOverride.isEmpty() && tag.contains("ApiUrl")) {
+            String legacyUrl = tag.getString("ApiUrl");
+            if (!legacyUrl.isEmpty() && !legacyUrl.equals(VoiceDoorConfig.apiUrl())) {
+                apiUrlOverride = legacyUrl;
+            }
+        }
+    }
+
+    /**
+     * Hanya kirim ke client apa yang dibutuhkan untuk render.
+     *
+     * <p>Versi lama mengirim seluruh NBT lewat {@code saveWithoutMetadata()}, sehingga
+     * setiap client bisa membaca UUID pemilik dan URL API tiap pintu.
+     */
+    @Override
+    public CompoundTag getUpdateTag() {
+        CompoundTag tag = new CompoundTag();
+        tag.putString("OwnerName", ownerName);
+        return tag;
     }
 
     @Nullable
@@ -411,14 +469,41 @@ public class VoiceDoorBlockEntity extends BlockEntity {
     }
 
     @Override
-    public CompoundTag getUpdateTag() {
-        return saveWithoutMetadata();
+    public void onDataPacket(Connection net, ClientboundBlockEntityDataPacket pkt) {
+        CompoundTag tag = pkt.getTag();
+        if (tag != null) {
+            ownerName = tag.getString("OwnerName");
+        }
     }
 
-    @Override
-    public void onDataPacket(Connection net, ClientboundBlockEntityDataPacket pkt) {
-        if (pkt.getTag() != null) {
-            load(pkt.getTag());
+    // -----------------------------------------------------------------------
+    // Util
+    // -----------------------------------------------------------------------
+    /** Escape minimal untuk menyisipkan nama ke dalam body JSON kecil. */
+    private static String escapeJson(String raw) {
+        StringBuilder out = new StringBuilder(raw.length() + 8);
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            switch (c) {
+                case '"' -> out.append("\\\"");
+                case '\\' -> out.append("\\\\");
+                case '\n' -> out.append("\\n");
+                case '\r' -> out.append("\\r");
+                case '\t' -> out.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        out.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        out.append(c);
+                    }
+                }
+            }
         }
+        return out.toString();
+    }
+
+    /** Daftar pemain berizin sebagai list agar mudah ditampilkan command. */
+    public List<UUID> authorizedList() {
+        return new ArrayList<>(authorizedPlayers);
     }
 }

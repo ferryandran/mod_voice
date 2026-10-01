@@ -1,95 +1,102 @@
 package com.voicedoor.command;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.voicedoor.VoiceDoorMod;
+import com.voicedoor.api.VoiceApiClient;
 import com.voicedoor.blockentity.VoiceDoorBlockEntity;
-import com.voicedoor.voice.VoiceRecordingSession;
+import com.voicedoor.config.VoiceDoorConfig;
+import com.voicedoor.network.ModNetwork;
+import com.voicedoor.network.S2CStatusPacket;
+import com.voicedoor.voice.VoiceChatPlugin;
+import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import javax.annotation.Nullable;
+import java.util.StringJoiner;
+import java.util.UUID;
 
 /**
- * Commands untuk VoiceDoor mod:
+ * Command {@code /voicedoor}.
  *
- * /voicedoor register [nama]
- *   - Mulai sesi rekaman untuk mendaftarkan suara ke pintu yang sedang dilihat
- *   - Nama opsional (default: nama pemain)
- *
- * /voicedoor train
- *   - Trigger training model di Python API server
- *
- * /voicedoor status
- *   - Cek status API server dan daftar member terdaftar
- *
- * /voicedoor setowner <player>
- *   - Set owner pintu yang sedang dilihat (OP only)
- *
- * /voicedoor setapi <url>
- *   - Set URL API server untuk pintu yang sedang dilihat (OP only)
- *
- * /voicedoor info
- *   - Tampilkan info pintu yang sedang dilihat
+ * <p>Semua parsing JSON di sini memakai Gson lewat {@link VoiceApiClient}. Versi
+ * sebelumnya punya parser string buatan sendiri ({@code extractJsonString}) yang tidak
+ * menangani escape, objek bersarang, maupun spasi setelah nama kunci - padahal Gson sudah
+ * ada di classpath dan dipakai di tempat lain.
  */
-public class VoiceDoorCommands {
+public final class VoiceDoorCommands {
 
-    private static final ExecutorService EXECUTOR = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "VoiceDoor-CMD");
-        t.setDaemon(true);
-        return t;
-    });
+    private static final int OP_LEVEL = 2;
+
+    private VoiceDoorCommands() {
+    }
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         dispatcher.register(Commands.literal("voicedoor")
-                // /voicedoor register [nama]
                 .then(Commands.literal("register")
                         .executes(ctx -> cmdRegister(ctx, ""))
-                        .then(Commands.argument("name", StringArgumentType.string())
+                        .then(Commands.argument("name", StringArgumentType.word())
                                 .executes(ctx -> cmdRegister(ctx, StringArgumentType.getString(ctx, "name")))))
 
-                // /voicedoor train
-                .then(Commands.literal("train")
-                        .executes(VoiceDoorCommands::cmdTrain))
+                .then(Commands.literal("info").executes(VoiceDoorCommands::cmdInfo))
+                .then(Commands.literal("status").executes(VoiceDoorCommands::cmdStatus))
+                .then(Commands.literal("help").executes(VoiceDoorCommands::cmdHelp))
 
-                // /voicedoor status
-                .then(Commands.literal("status")
-                        .executes(VoiceDoorCommands::cmdStatus))
+                .then(Commands.literal("allow")
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .executes(VoiceDoorCommands::cmdAllow)))
+                .then(Commands.literal("deny")
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .executes(VoiceDoorCommands::cmdDeny)))
 
-                // /voicedoor info
-                .then(Commands.literal("info")
-                        .executes(VoiceDoorCommands::cmdInfo))
-
-                // /voicedoor setapi <url> (OP only)
+                // --- OP saja -------------------------------------------------
                 .then(Commands.literal("setapi")
-                        .requires(src -> src.hasPermission(2))
-                        .then(Commands.argument("url", StringArgumentType.string())
+                        .requires(src -> src.hasPermission(OP_LEVEL))
+                        .then(Commands.argument("url", StringArgumentType.greedyString())
                                 .executes(ctx -> cmdSetApi(ctx, StringArgumentType.getString(ctx, "url")))))
 
-                // /voicedoor setowner <playerName> (OP only)
-                .then(Commands.literal("setowner")
-                        .requires(src -> src.hasPermission(2))
-                        .then(Commands.argument("playerName", StringArgumentType.word())
-                                .executes(ctx -> cmdSetOwner(ctx, StringArgumentType.getString(ctx, "playerName")))))
+                .then(Commands.literal("settoken")
+                        .requires(src -> src.hasPermission(OP_LEVEL))
+                        .then(Commands.argument("token", StringArgumentType.greedyString())
+                                .executes(ctx -> cmdSetToken(ctx, StringArgumentType.getString(ctx, "token")))))
 
-                // /voicedoor help
-                .then(Commands.literal("help")
-                        .executes(VoiceDoorCommands::cmdHelp))
+                .then(Commands.literal("setthreshold")
+                        .requires(src -> src.hasPermission(OP_LEVEL))
+                        .then(Commands.argument("value", DoubleArgumentType.doubleArg(0.35D, 0.95D))
+                                .executes(ctx -> cmdSetThreshold(ctx,
+                                        DoubleArgumentType.getDouble(ctx, "value")))))
+
+                .then(Commands.literal("setowner")
+                        .requires(src -> src.hasPermission(OP_LEVEL))
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .executes(VoiceDoorCommands::cmdSetOwner)))
+
+                .then(Commands.literal("clearowner")
+                        .requires(src -> src.hasPermission(OP_LEVEL))
+                        .executes(VoiceDoorCommands::cmdClearOwner))
+
+                .then(Commands.literal("enroll")
+                        .requires(src -> src.hasPermission(OP_LEVEL))
+                        .then(Commands.argument("member", StringArgumentType.word())
+                                .executes(ctx -> cmdEnroll(ctx, StringArgumentType.getString(ctx, "member")))))
+
+                .then(Commands.literal("reload")
+                        .requires(src -> src.hasPermission(OP_LEVEL))
+                        .executes(VoiceDoorCommands::cmdReload))
         );
     }
 
@@ -97,168 +104,46 @@ public class VoiceDoorCommands {
     // /voicedoor register [nama]
     // -----------------------------------------------------------------------
     private static int cmdRegister(CommandContext<CommandSourceStack> ctx, String nameArg) {
-        CommandSourceStack source = ctx.getSource();
-        ServerPlayer player;
-        try {
-            player = source.getPlayerOrException();
-        } catch (Exception e) {
-            source.sendFailure(Component.literal("Command ini hanya bisa digunakan oleh pemain."));
+        ServerPlayer player = playerOrNull(ctx);
+        if (player == null) return 0;
+
+        VoiceDoorBlockEntity door = lookedAtDoor(player);
+        if (door == null) {
+            reply(player, "message.voicedoor.look_at_door", ChatFormatting.RED);
             return 0;
         }
 
-        String memberName = nameArg.isEmpty() ? player.getName().getString() : nameArg;
-
-        // Cari VoiceDoor yang sedang dilihat pemain
-        VoiceDoorBlockEntity voiceDoorBE = getLookedAtDoor(player);
-        if (voiceDoorBE == null) {
-            player.sendSystemMessage(Component.literal(
-                    "§c[VoiceDoor] Arahkan pandanganmu ke VoiceDoor terlebih dahulu!"));
+        if (VoiceChatPlugin.hasActiveSession(player.getUUID())) {
+            reply(player, "message.voicedoor.session_busy", ChatFormatting.YELLOW);
             return 0;
+        }
+        if (!VoiceDoorMod.VOICE_CHAT_AVAILABLE) {
+            reply(player, "message.voicedoor.no_voicechat", ChatFormatting.RED);
+            return 0;
+        }
+
+        // Hanya pemilik (atau OP) boleh mendaftarkan nama selain namanya sendiri.
+        String memberName = nameArg.isEmpty() ? player.getName().getString() : nameArg;
+        if (!nameArg.isEmpty() && !nameArg.equalsIgnoreCase(player.getName().getString())) {
+            boolean isOwner = door.hasOwner() && player.getUUID().equals(door.getOwnerUUID());
+            if (!isOwner && !ctx.getSource().hasPermission(OP_LEVEL)) {
+                reply(player, "message.voicedoor.cannot_register_other", ChatFormatting.RED);
+                return 0;
+            }
         }
 
         Level level = player.level();
-        BlockPos pos = voiceDoorBE.getBlockPos();
+        BlockPos pos = door.getBlockPos();
 
-        player.sendSystemMessage(Component.literal(
-                "§6[VoiceDoor] Memulai pendaftaran suara untuk: §e" + memberName));
-        player.sendSystemMessage(Component.literal(
-                "§7[VoiceDoor] Tip: Rekam 3-5 kali, masing-masing bicara 3-5 detik secara alami."));
+        player.sendSystemMessage(Component.translatable("message.voicedoor.register_start", memberName)
+                .withStyle(ChatFormatting.GOLD));
+        player.sendSystemMessage(Component.translatable("message.voicedoor.register_tip")
+                .withStyle(ChatFormatting.GRAY));
 
-        VoiceRecordingSession.startRegistration(player, voiceDoorBE, pos, level, memberName);
-        return 1;
-    }
-
-    // -----------------------------------------------------------------------
-    // /voicedoor train
-    // -----------------------------------------------------------------------
-    private static int cmdTrain(CommandContext<CommandSourceStack> ctx) {
-        CommandSourceStack source = ctx.getSource();
-        ServerPlayer player;
-        try {
-            player = source.getPlayerOrException();
-        } catch (Exception e) {
-            source.sendFailure(Component.literal("Command ini hanya bisa digunakan oleh pemain."));
-            return 0;
-        }
-
-        // Dapatkan API URL dari pintu yang dilihat, atau gunakan default
-        VoiceDoorBlockEntity be = getLookedAtDoor(player);
-        String apiUrl = be != null ? be.getApiUrl() : VoiceDoorBlockEntity.DEFAULT_API_URL;
-
-        player.sendSystemMessage(Component.literal(
-                "§b[VoiceDoor] Memulai training model di server Python... Ini bisa memakan beberapa menit."));
-
-        EXECUTOR.submit(() -> {
-            try {
-                HttpURLConnection conn = (HttpURLConnection) new URL(apiUrl + "/train").openConnection();
-                conn.setRequestMethod("POST");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(300000); // 5 menit timeout untuk training
-                conn.setDoOutput(true);
-                conn.setRequestProperty("Content-Type", "application/json");
-
-                String body = "{\"augment\":true,\"noise_reduction\":true,\"balance\":true}";
-                conn.setRequestProperty("Content-Length", String.valueOf(body.length()));
-                OutputStream os = conn.getOutputStream();
-                os.write(body.getBytes(StandardCharsets.UTF_8));
-                os.close();
-
-                int code = conn.getResponseCode();
-                String response;
-                try (BufferedReader br = new BufferedReader(new InputStreamReader(
-                        code >= 200 ? conn.getInputStream() : conn.getErrorStream()))) {
-                    StringBuilder sb = new StringBuilder();
-                    String line;
-                    while ((line = br.readLine()) != null) sb.append(line);
-                    response = sb.toString();
-                }
-
-                // Parse JSON sederhana
-                boolean success = response.contains("\"success\":true");
-                String finalMsg;
-                if (success) {
-                    String model = extractJsonString(response, "best_model");
-                    String accuracy = extractJsonString(response, "test_accuracy");
-                    finalMsg = String.format("§a[VoiceDoor] ✓ Training selesai! Model: §e%s §a| Akurasi: §e%s",
-                            model, accuracy);
-                } else {
-                    String error = extractJsonString(response, "error");
-                    finalMsg = "§c[VoiceDoor] Training gagal: " + error;
-                }
-
-                String finalFinalMsg = finalMsg;
-                if (player.server != null) {
-                    player.server.execute(() ->
-                            player.sendSystemMessage(Component.literal(finalFinalMsg)));
-                }
-
-            } catch (Exception e) {
-                VoiceDoorMod.LOGGER.error("[VoiceDoor] Training request gagal: {}", e.getMessage());
-                if (player.server != null) {
-                    player.server.execute(() ->
-                            player.sendSystemMessage(Component.literal(
-                                    "§c[VoiceDoor] Tidak bisa terhubung ke API server: " + e.getMessage())));
-                }
-            }
-        });
-
-        return 1;
-    }
-
-    // -----------------------------------------------------------------------
-    // /voicedoor status
-    // -----------------------------------------------------------------------
-    private static int cmdStatus(CommandContext<CommandSourceStack> ctx) {
-        CommandSourceStack source = ctx.getSource();
-        ServerPlayer player;
-        try {
-            player = source.getPlayerOrException();
-        } catch (Exception e) {
-            source.sendFailure(Component.literal("Command ini hanya bisa digunakan oleh pemain."));
-            return 0;
-        }
-
-        VoiceDoorBlockEntity be = getLookedAtDoor(player);
-        String apiUrl = be != null ? be.getApiUrl() : VoiceDoorBlockEntity.DEFAULT_API_URL;
-
-        EXECUTOR.submit(() -> {
-            try {
-                HttpURLConnection conn = (HttpURLConnection) new URL(apiUrl + "/status").openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(3000);
-                conn.setReadTimeout(5000);
-
-                int code = conn.getResponseCode();
-                String response;
-                try (BufferedReader br = new BufferedReader(new InputStreamReader(
-                        code >= 200 ? conn.getInputStream() : conn.getErrorStream()))) {
-                    StringBuilder sb = new StringBuilder();
-                    String line;
-                    while ((line = br.readLine()) != null) sb.append(line);
-                    response = sb.toString();
-                }
-
-                String modelReady = response.contains("\"model_ready\":true") ? "§a✓ Siap" : "§c✗ Belum dilatih";
-                String members = extractJsonString(response, "registered_members");
-
-                String finalMsg = String.format(
-                        "§b[VoiceDoor] Status API: §fServer=%s | Model=%s | Members=%s",
-                        apiUrl, modelReady, members.isEmpty() ? "§c(belum ada)" : "§e" + members);
-
-                if (player.server != null) {
-                    player.server.execute(() ->
-                            player.sendSystemMessage(Component.literal(finalMsg)));
-                }
-
-            } catch (Exception e) {
-                if (player.server != null) {
-                    player.server.execute(() ->
-                            player.sendSystemMessage(Component.literal(
-                                    "§c[VoiceDoor] API server tidak bisa dihubungi di: " + apiUrl)));
-                }
-            }
-        });
-
+        VoiceChatPlugin.startRegistrationSession(player, level, pos, memberName);
+        ModNetwork.sendTo(player, S2CStatusPacket.recordingStart("", VoiceDoorConfig.recordingSeconds()));
+        player.sendSystemMessage(Component.translatable(
+                "message.voicedoor.speak_now", VoiceDoorConfig.recordingSeconds()));
         return 1;
     }
 
@@ -266,88 +151,230 @@ public class VoiceDoorCommands {
     // /voicedoor info
     // -----------------------------------------------------------------------
     private static int cmdInfo(CommandContext<CommandSourceStack> ctx) {
-        CommandSourceStack source = ctx.getSource();
-        ServerPlayer player;
-        try {
-            player = source.getPlayerOrException();
-        } catch (Exception e) {
-            source.sendFailure(Component.literal("Command ini hanya bisa digunakan oleh pemain."));
+        ServerPlayer player = playerOrNull(ctx);
+        if (player == null) return 0;
+
+        VoiceDoorBlockEntity door = lookedAtDoor(player);
+        if (door == null) {
+            reply(player, "message.voicedoor.look_at_door", ChatFormatting.RED);
             return 0;
         }
 
-        VoiceDoorBlockEntity be = getLookedAtDoor(player);
-        if (be == null) {
-            player.sendSystemMessage(Component.literal(
-                    "§c[VoiceDoor] Arahkan pandanganmu ke VoiceDoor!"));
-            return 0;
-        }
+        player.sendSystemMessage(Component.translatable("message.voicedoor.info_header")
+                .withStyle(ChatFormatting.AQUA));
+        line(player, "message.voicedoor.info_position", door.getBlockPos().toShortString());
+        line(player, "message.voicedoor.info_owner",
+                door.hasOwner() ? door.getOwnerName() : "-");
+        line(player, "message.voicedoor.info_api",
+                door.getApiUrl() + (door.hasApiUrlOverride() ? " (override)" : ""));
+        line(player, "message.voicedoor.info_threshold",
+                String.format(java.util.Locale.ROOT, "%.2f", VoiceDoorConfig.threshold()));
+        line(player, "message.voicedoor.info_state",
+                door.isOpen()
+                        ? Component.translatable("message.voicedoor.state_open",
+                                door.getRemainingOpenTicks() / 20).getString()
+                        : Component.translatable("message.voicedoor.state_closed").getString());
 
-        player.sendSystemMessage(Component.literal("§b--- VoiceDoor Info ---"));
-        player.sendSystemMessage(Component.literal("§7Posisi: §f" + be.getBlockPos().toShortString()));
-        player.sendSystemMessage(Component.literal("§7Pemilik: §e" +
-                (be.getOwnerName().isEmpty() ? "§c(belum ada)" : be.getOwnerName())));
-        player.sendSystemMessage(Component.literal("§7API Server: §f" + be.getApiUrl()));
+        StringJoiner allowed = new StringJoiner(", ");
+        for (UUID uuid : door.authorizedList()) {
+            ServerPlayer known = player.server.getPlayerList().getPlayer(uuid);
+            allowed.add(known != null ? known.getName().getString() : uuid.toString().substring(0, 8));
+        }
+        line(player, "message.voicedoor.info_allowed",
+                allowed.length() == 0 ? "-" : allowed.toString());
         return 1;
     }
 
     // -----------------------------------------------------------------------
-    // /voicedoor setapi <url>
+    // /voicedoor status
+    // -----------------------------------------------------------------------
+    private static int cmdStatus(CommandContext<CommandSourceStack> ctx) {
+        ServerPlayer player = playerOrNull(ctx);
+        if (player == null) return 0;
+
+        reply(player, "message.voicedoor.status_checking", ChatFormatting.AQUA);
+
+        boolean queued = VoiceApiClient.tryGetAsync("/status", response -> onServer(player, () -> {
+            if (!response.isSuccess()) {
+                player.sendSystemMessage(Component.translatable(
+                        "message.voicedoor.status_unreachable",
+                        VoiceDoorConfig.apiUrl(), response.errorMessage())
+                        .withStyle(ChatFormatting.RED));
+                return;
+            }
+
+            String mode = response.optString("mode", "?");
+            String enrolled = joinArray(response.body() == null ? null
+                    : response.body().get("enrolled_members"));
+            String registered = joinArray(response.body() == null ? null
+                    : response.body().get("registered_members"));
+            double serverThreshold = response.optDouble("verify_threshold", -1.0);
+
+            player.sendSystemMessage(Component.translatable("message.voicedoor.status_header")
+                    .withStyle(ChatFormatting.AQUA));
+            line(player, "message.voicedoor.status_server", VoiceDoorConfig.apiUrl());
+            line(player, "message.voicedoor.status_mode", mode);
+            line(player, "message.voicedoor.status_enrolled", enrolled.isEmpty() ? "-" : enrolled);
+            line(player, "message.voicedoor.status_samples", registered.isEmpty() ? "-" : registered);
+            if (serverThreshold >= 0) {
+                line(player, "message.voicedoor.status_threshold",
+                        String.format(java.util.Locale.ROOT, "%.2f", serverThreshold));
+            }
+            line(player, "message.voicedoor.status_token",
+                    VoiceDoorConfig.hasToken()
+                            ? Component.translatable("message.voicedoor.token_set").getString()
+                            : Component.translatable("message.voicedoor.token_missing").getString());
+        }));
+
+        if (!queued) reply(player, "message.voicedoor.server_busy", ChatFormatting.RED);
+        return 1;
+    }
+
+    // -----------------------------------------------------------------------
+    // Izin pemain
+    // -----------------------------------------------------------------------
+    private static int cmdAllow(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        ServerPlayer player = playerOrNull(ctx);
+        if (player == null) return 0;
+        VoiceDoorBlockEntity door = requireOwnedDoor(ctx, player);
+        if (door == null) return 0;
+
+        ServerPlayer target = EntityArgument.getPlayer(ctx, "player");
+        door.addAuthorizedPlayer(target.getUUID());
+        player.sendSystemMessage(Component.translatable(
+                "message.voicedoor.allowed", target.getName().getString())
+                .withStyle(ChatFormatting.GREEN));
+        target.sendSystemMessage(Component.translatable(
+                "message.voicedoor.you_were_allowed", door.getOwnerName())
+                .withStyle(ChatFormatting.GREEN));
+        return 1;
+    }
+
+    private static int cmdDeny(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        ServerPlayer player = playerOrNull(ctx);
+        if (player == null) return 0;
+        VoiceDoorBlockEntity door = requireOwnedDoor(ctx, player);
+        if (door == null) return 0;
+
+        ServerPlayer target = EntityArgument.getPlayer(ctx, "player");
+        boolean removed = door.removeAuthorizedPlayer(target.getUUID());
+        player.sendSystemMessage(Component.translatable(
+                removed ? "message.voicedoor.denied" : "message.voicedoor.not_allowed",
+                target.getName().getString())
+                .withStyle(removed ? ChatFormatting.GREEN : ChatFormatting.YELLOW));
+        return removed ? 1 : 0;
+    }
+
+    // -----------------------------------------------------------------------
+    // Command OP
     // -----------------------------------------------------------------------
     private static int cmdSetApi(CommandContext<CommandSourceStack> ctx, String url) {
         CommandSourceStack source = ctx.getSource();
-        ServerPlayer player;
-        try {
-            player = source.getPlayerOrException();
-        } catch (Exception e) {
-            source.sendFailure(Component.literal("Command ini hanya bisa digunakan oleh pemain."));
+        String trimmed = url.trim();
+        if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+            source.sendFailure(Component.translatable("message.voicedoor.bad_url"));
             return 0;
         }
-
-        VoiceDoorBlockEntity be = getLookedAtDoor(player);
-        if (be == null) {
-            player.sendSystemMessage(Component.literal(
-                    "§c[VoiceDoor] Arahkan pandanganmu ke VoiceDoor!"));
-            return 0;
-        }
-
-        // Bersihkan trailing slash
-        String cleanUrl = url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
-        be.setApiUrl(cleanUrl);
-        player.sendSystemMessage(Component.literal(
-                "§a[VoiceDoor] API URL diubah ke: §e" + cleanUrl));
+        VoiceDoorConfig.setApiUrl(trimmed);
+        source.sendSuccess(() -> Component.translatable(
+                "message.voicedoor.api_set", VoiceDoorConfig.apiUrl())
+                .withStyle(ChatFormatting.GREEN), true);
         return 1;
     }
 
-    // -----------------------------------------------------------------------
-    // /voicedoor setowner <playerName>
-    // -----------------------------------------------------------------------
-    private static int cmdSetOwner(CommandContext<CommandSourceStack> ctx, String playerName) {
+    /**
+     * Token tidak pernah digaungkan kembali ke chat. Mengirimnya utuh akan membuat token
+     * muncul di log server dan di layar pemain lain yang menonton.
+     */
+    private static int cmdSetToken(CommandContext<CommandSourceStack> ctx, String token) {
         CommandSourceStack source = ctx.getSource();
-        ServerPlayer player;
-        try {
-            player = source.getPlayerOrException();
-        } catch (Exception e) {
-            source.sendFailure(Component.literal("Command ini hanya bisa digunakan oleh pemain."));
+        String trimmed = token.trim();
+        if (trimmed.isEmpty()) {
+            VoiceDoorConfig.setApiToken("");
+            source.sendSuccess(() -> Component.translatable("message.voicedoor.token_cleared")
+                    .withStyle(ChatFormatting.YELLOW), false);
+            return 1;
+        }
+        VoiceDoorConfig.setApiToken(trimmed);
+        source.sendSuccess(() -> Component.translatable(
+                "message.voicedoor.token_saved", trimmed.length())
+                .withStyle(ChatFormatting.GREEN), false);
+        return 1;
+    }
+
+    private static int cmdSetThreshold(CommandContext<CommandSourceStack> ctx, double value) {
+        VoiceDoorConfig.setThreshold(value);
+        ctx.getSource().sendSuccess(() -> Component.translatable(
+                "message.voicedoor.threshold_set",
+                String.format(java.util.Locale.ROOT, "%.2f", VoiceDoorConfig.threshold()))
+                .withStyle(ChatFormatting.GREEN), true);
+        return 1;
+    }
+
+    private static int cmdSetOwner(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        ServerPlayer player = playerOrNull(ctx);
+        if (player == null) return 0;
+        VoiceDoorBlockEntity door = lookedAtDoor(player);
+        if (door == null) {
+            reply(player, "message.voicedoor.look_at_door", ChatFormatting.RED);
             return 0;
         }
+        ServerPlayer target = EntityArgument.getPlayer(ctx, "player");
+        door.setOwner(target.getUUID(), target.getName().getString());
+        player.sendSystemMessage(Component.translatable(
+                "message.voicedoor.owner_set", target.getName().getString())
+                .withStyle(ChatFormatting.GREEN));
+        return 1;
+    }
 
-        VoiceDoorBlockEntity be = getLookedAtDoor(player);
-        if (be == null) {
-            player.sendSystemMessage(Component.literal(
-                    "§c[VoiceDoor] Arahkan pandanganmu ke VoiceDoor!"));
+    private static int cmdClearOwner(CommandContext<CommandSourceStack> ctx) {
+        ServerPlayer player = playerOrNull(ctx);
+        if (player == null) return 0;
+        VoiceDoorBlockEntity door = lookedAtDoor(player);
+        if (door == null) {
+            reply(player, "message.voicedoor.look_at_door", ChatFormatting.RED);
             return 0;
         }
+        door.clearOwner();
+        reply(player, "message.voicedoor.owner_cleared", ChatFormatting.GREEN);
+        return 1;
+    }
 
-        ServerPlayer targetPlayer = player.server.getPlayerList().getPlayerByName(playerName);
-        if (targetPlayer == null) {
-            player.sendSystemMessage(Component.literal(
-                    "§c[VoiceDoor] Pemain '" + playerName + "' tidak ditemukan atau tidak online."));
+    private static int cmdEnroll(CommandContext<CommandSourceStack> ctx, String member) {
+        CommandSourceStack source = ctx.getSource();
+        source.sendSuccess(() -> Component.translatable("message.voicedoor.enroll_start", member)
+                .withStyle(ChatFormatting.AQUA), false);
+
+        boolean queued = VoiceApiClient.tryPostJsonAsync("/enroll",
+                "{\"member\":\"" + member.replace("\"", "\\\"") + "\"}",
+                response -> {
+                    Component message = response.isSuccess()
+                            ? Component.translatable("message.voicedoor.enroll_done",
+                                    response.optString("member", member),
+                                    (int) response.optDouble("n_segments", 0),
+                                    String.format(java.util.Locale.ROOT, "%.2f",
+                                            response.optDouble("cohesion", 0.0)))
+                                .withStyle(ChatFormatting.GREEN)
+                            : Component.translatable("message.voicedoor.enroll_failed",
+                                    response.errorMessage()).withStyle(ChatFormatting.RED);
+                    // sendSuccess harus dipanggil di main thread server
+                    source.getServer().execute(() -> source.sendSuccess(() -> message, false));
+                });
+
+        if (!queued) {
+            source.sendFailure(Component.translatable("message.voicedoor.server_busy"));
             return 0;
         }
+        return 1;
+    }
 
-        be.setOwner(targetPlayer.getUUID(), playerName);
-        player.sendSystemMessage(Component.literal(
-                "§a[VoiceDoor] Owner pintu diubah ke: §e" + playerName));
+    private static int cmdReload(CommandContext<CommandSourceStack> ctx) {
+        ctx.getSource().sendSuccess(() -> Component.translatable(
+                "message.voicedoor.reloaded",
+                VoiceDoorConfig.apiUrl(),
+                String.format(java.util.Locale.ROOT, "%.2f", VoiceDoorConfig.threshold()),
+                VoiceChatPlugin.activeSessionCount())
+                .withStyle(ChatFormatting.GREEN), false);
         return 1;
     }
 
@@ -356,71 +383,119 @@ public class VoiceDoorCommands {
     // -----------------------------------------------------------------------
     private static int cmdHelp(CommandContext<CommandSourceStack> ctx) {
         CommandSourceStack source = ctx.getSource();
-        source.sendSuccess(() -> Component.literal(
-                "§b=== VoiceDoor Commands ===\n" +
-                "§e/voicedoor register §7[nama] §f- Daftarkan suara ke pintu yang dilihat\n" +
-                "§e/voicedoor train §f- Latih model pengenal suara\n" +
-                "§e/voicedoor status §f- Cek status API server\n" +
-                "§e/voicedoor info §f- Info pintu yang dilihat\n" +
-                "§e/voicedoor setapi §7<url> §f- (OP) Set URL API server\n" +
-                "§e/voicedoor setowner §7<player> §f- (OP) Set pemilik pintu\n" +
-                "§e/voicedoor help §f- Tampilkan bantuan ini"
-        ), false);
+        source.sendSuccess(() -> Component.translatable("message.voicedoor.help_header")
+                .withStyle(ChatFormatting.AQUA), false);
+        for (String key : new String[]{
+                "message.voicedoor.help_register",
+                "message.voicedoor.help_info",
+                "message.voicedoor.help_status",
+                "message.voicedoor.help_allow",
+                "message.voicedoor.help_deny",
+        }) {
+            source.sendSuccess(() -> Component.translatable(key), false);
+        }
+        if (source.hasPermission(OP_LEVEL)) {
+            source.sendSuccess(() -> Component.translatable("message.voicedoor.help_op_header")
+                    .withStyle(ChatFormatting.GOLD), false);
+            for (String key : new String[]{
+                    "message.voicedoor.help_setapi",
+                    "message.voicedoor.help_settoken",
+                    "message.voicedoor.help_setthreshold",
+                    "message.voicedoor.help_setowner",
+                    "message.voicedoor.help_clearowner",
+                    "message.voicedoor.help_enroll",
+                    "message.voicedoor.help_reload",
+            }) {
+                source.sendSuccess(() -> Component.translatable(key), false);
+            }
+        }
         return 1;
     }
 
     // -----------------------------------------------------------------------
-    // Helpers
+    // Helper
     // -----------------------------------------------------------------------
+    @Nullable
+    private static ServerPlayer playerOrNull(CommandContext<CommandSourceStack> ctx) {
+        try {
+            return ctx.getSource().getPlayerOrException();
+        } catch (CommandSyntaxException e) {
+            ctx.getSource().sendFailure(Component.translatable("message.voicedoor.players_only"));
+            return null;
+        }
+    }
 
-    /**
-     * Dapatkan VoiceDoorBlockEntity dari pintu yang sedang dilihat pemain.
-     * Melihat ke bawah satu blok juga (untuk bagian atas pintu).
-     */
-    private static VoiceDoorBlockEntity getLookedAtDoor(ServerPlayer player) {
-        HitResult hitResult = player.pick(5.0, 0, false);
-        if (hitResult.getType() != HitResult.Type.BLOCK) return null;
-
-        BlockPos pos = ((BlockHitResult) hitResult).getBlockPos();
-        Level level = player.level();
-
-        // Cek blok yang diklik
-        BlockEntity be = level.getBlockEntity(pos);
-        if (be instanceof VoiceDoorBlockEntity vbe) return vbe;
-
-        // Cek blok di bawah (mungkin klik bagian atas pintu)
-        be = level.getBlockEntity(pos.below());
-        if (be instanceof VoiceDoorBlockEntity vbe) return vbe;
-
-        return null;
+    /** Pintu yang dilihat pemain, dan pastikan dia pemiliknya (atau OP). */
+    @Nullable
+    private static VoiceDoorBlockEntity requireOwnedDoor(CommandContext<CommandSourceStack> ctx,
+                                                         ServerPlayer player) {
+        VoiceDoorBlockEntity door = lookedAtDoor(player);
+        if (door == null) {
+            reply(player, "message.voicedoor.look_at_door", ChatFormatting.RED);
+            return null;
+        }
+        if (!door.hasOwner()) {
+            reply(player, "message.voicedoor.no_owner", ChatFormatting.YELLOW);
+            return null;
+        }
+        boolean isOwner = player.getUUID().equals(door.getOwnerUUID());
+        if (!isOwner && !ctx.getSource().hasPermission(OP_LEVEL)) {
+            reply(player, "message.voicedoor.not_owner", ChatFormatting.RED);
+            return null;
+        }
+        return door;
     }
 
     /**
-     * Ekstrak nilai string dari JSON sederhana (tanpa library JSON).
+     * Block entity pintu yang sedang dilihat pemain.
+     *
+     * <p>Mengklik separuh atas juga dihitung: block entity hanya ada di separuh bawah,
+     * jadi posisi di bawahnya ikut diperiksa.
      */
-    private static String extractJsonString(String json, String key) {
-        String search = "\"" + key + "\":";
-        int idx = json.indexOf(search);
-        if (idx < 0) return "";
-        int valueStart = idx + search.length();
-        while (valueStart < json.length() && json.charAt(valueStart) == ' ') valueStart++;
-
-        if (valueStart >= json.length()) return "";
-        char c = json.charAt(valueStart);
-
-        if (c == '"') {
-            // String value
-            int end = json.indexOf('"', valueStart + 1);
-            return end < 0 ? "" : json.substring(valueStart + 1, end);
-        } else if (c == '[') {
-            // Array value
-            int end = json.indexOf(']', valueStart);
-            return end < 0 ? "" : json.substring(valueStart, end + 1);
-        } else {
-            // Number or boolean
-            int end = valueStart;
-            while (end < json.length() && json.charAt(end) != ',' && json.charAt(end) != '}') end++;
-            return json.substring(valueStart, end).trim();
+    @Nullable
+    private static VoiceDoorBlockEntity lookedAtDoor(ServerPlayer player) {
+        HitResult hit = player.pick(6.0D, 0.0F, false);
+        if (hit.getType() != HitResult.Type.BLOCK) {
+            return null;
         }
+        BlockPos pos = ((BlockHitResult) hit).getBlockPos();
+        Level level = player.level();
+
+        if (level.getBlockEntity(pos) instanceof VoiceDoorBlockEntity door) {
+            return door;
+        }
+        if (level.getBlockEntity(pos.below()) instanceof VoiceDoorBlockEntity door) {
+            return door;
+        }
+        return null;
+    }
+
+    private static void reply(ServerPlayer player, String key, ChatFormatting color) {
+        player.sendSystemMessage(Component.translatable(key).withStyle(color));
+    }
+
+    private static void line(ServerPlayer player, String key, Object value) {
+        player.sendSystemMessage(Component.translatable(key, value).withStyle(ChatFormatting.GRAY));
+    }
+
+    private static void onServer(ServerPlayer player, Runnable action) {
+        if (player.level() instanceof ServerLevel serverLevel) {
+            serverLevel.getServer().execute(action);
+        }
+    }
+
+    /** Gabungkan array JSON menjadi string yang enak dibaca. */
+    private static String joinArray(@Nullable JsonElement element) {
+        if (element == null || !element.isJsonArray()) {
+            return "";
+        }
+        JsonArray array = element.getAsJsonArray();
+        StringJoiner joiner = new StringJoiner(", ");
+        for (JsonElement item : array) {
+            if (item.isJsonPrimitive()) {
+                joiner.add(item.getAsString());
+            }
+        }
+        return joiner.toString();
     }
 }
