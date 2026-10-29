@@ -16,4 +16,9 @@ public class ModItems {
     public static final RegistryObject<BlockItem> VOICE_DOOR = ITEMS.register("voice_door",
             () -> new BlockItem(ModBlocks.VOICE_DOOR.get(),
                     new Item.Properties().stacksTo(1)));
+
+    // Item untuk papan logo Kopdes
+    public static final RegistryObject<BlockItem> KOPDES_LOGO = ITEMS.register("kopdes_logo",
+            () -> new BlockItem(ModBlocks.KOPDES_LOGO.get(),
+                    new Item.Properties()));
 }

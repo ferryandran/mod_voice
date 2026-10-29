@@ -30,6 +30,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "_auth_required", True)
     monkeypatch.setattr(api, "_verify_threshold", 0.45)
     monkeypatch.setattr(api, "_require_challenge", True)
+    monkeypatch.setattr(api, "_door_password", "")
 
     centroid = np.zeros(ECAPA_DIM, dtype=np.float32)
     centroid[0] = 1.0
@@ -305,3 +306,57 @@ def test_unknown_endpoint_returns_json_not_html(client):
 def test_no_auth_mode_lets_requests_through(client, monkeypatch):
     monkeypatch.setattr(api, "_auth_required", False)
     assert client.get("/status").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Password Endpoint & Verification
+# ---------------------------------------------------------------------------
+def test_password_endpoint_get_and_set(client):
+    # GET initial
+    resp = client.get("/password", headers=auth())
+    assert resp.status_code == 200
+    assert resp.get_json()["password"] == ""
+
+    # POST set new password
+    resp = client.post("/password", headers=auth(), json={"password": "kopdes jaya jaya jaya"})
+    assert resp.status_code == 200
+    assert resp.get_json()["password"] == "kopdes jaya jaya jaya"
+
+    # GET again to verify
+    resp = client.get("/password", headers=auth())
+    assert resp.status_code == 200
+    assert resp.get_json()["password"] == "kopdes jaya jaya jaya"
+
+
+def test_verify_requires_password_when_configured(client, monkeypatch):
+    monkeypatch.setattr(api, "_door_password", "kopdes jaya")
+    # Mock _transcribe_bytes returning matching text
+    monkeypatch.setattr(api, "_transcribe_bytes", lambda y, lang: "halo kopdes jaya semua")
+
+    cid = get_challenge(client)
+    resp = client.post("/verify", headers=auth(), data={
+        "member": "Budi", "challenge_id": cid, "audio": (Path(__file__), "v.wav")
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["accepted"] is True
+    assert body["password_ok"] is True
+    assert body["voice_ok"] is True
+    assert body["transcript"] == "halo kopdes jaya semua"
+
+
+def test_verify_rejects_when_password_does_not_match(client, monkeypatch):
+    monkeypatch.setattr(api, "_door_password", "kopdes jaya")
+    # Mock _transcribe_bytes returning non-matching text
+    monkeypatch.setattr(api, "_transcribe_bytes", lambda y, lang: "halo selamat pagi")
+
+    cid = get_challenge(client)
+    resp = client.post("/verify", headers=auth(), data={
+        "member": "Budi", "challenge_id": cid, "audio": (Path(__file__), "v.wav")
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["accepted"] is False
+    assert body["password_ok"] is False
+    assert body["voice_ok"] is True  # voice itself matched, but password didn't
+    assert "Password tidak cocok" in body["error"]

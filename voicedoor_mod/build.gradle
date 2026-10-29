@@ -89,6 +89,15 @@ repositories {
         }
     }
 
+    // CurseForge Maven - untuk Macaw's Doors dan mod CurseForge lain.
+    maven {
+        name = 'CurseForge'
+        url = 'https://cursemaven.com'
+        content {
+            includeGroup 'curse.maven'
+        }
+    }
+
     mavenCentral()
 }
 
@@ -111,6 +120,13 @@ dependencies {
     // Di Minecraft sungguhan sebaliknya: pasang jar rilis voicechat seperti biasa, karena
     // runtime produksi memang memakai nama SRG.
     runtimeOnly fg.deobf("maven.modrinth:simple-voice-chat:forge-1.20.1-2.6.23")
+
+    // Macaw's Doors - kompile terhadap API-nya untuk membaca state pintu garage.
+    // File ID 7618714 = versi v1.1.5 untuk mc1.20.1.
+    // Hanya compileOnly: jar penuh Macaw's Doors dipasang pemain secara terpisah.
+    compileOnly fg.deobf("curse.maven:macaws-doors-378646:7618714")
+    // runtimeOnly untuk dev environment supaya runClient bisa menjalankannya.
+    runtimeOnly fg.deobf("curse.maven:macaws-doors-378646:7618714")
 }
 
 jar {

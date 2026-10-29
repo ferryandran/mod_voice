@@ -125,10 +125,11 @@ Di dalam game, sebagai operator:
 | `/voicedoor info` | Detail pintu itu (pemilik, ambang, status) |
 | `/voicedoor status` | Cek koneksi dan kondisi server suara |
 | `/voicedoor allow <pemain>` | Izinkan pemain lain memakai pintumu |
-| `/voicedoor deny <pemain>` | Cabut izin itu |
+| `/voicedoor password <on/off/status/toggle>` | Hidupkan, matikan, atau periksa status kata sandi suara |
+| `/voicedoor setpassword <kata>` | Ganti kata sandi suara (default: `kopdes jaya jaya jaya`) |
 | `/voicedoor help` | Daftar lengkap |
 
-Khusus operator: `settoken`, `setapi`, `setthreshold`, `setowner`, `clearowner`, `enroll`, `reload`.
+Khusus operator: `password`, `setpassword`, `settoken`, `setapi`, `setthreshold`, `setowner`, `clearowner`, `enroll`, `reload`, `registerfile`.
 
 ### Konfigurasi
 

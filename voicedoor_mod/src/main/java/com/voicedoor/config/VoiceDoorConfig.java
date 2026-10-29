@@ -62,9 +62,9 @@ public final class VoiceDoorConfig {
         return SERVER.recordingSeconds.get();
     }
 
-    /** Batas waktu sesi rekaman: durasi rekaman + kelonggaran, dalam tick. */
-    public static int sessionTimeoutTicks() {
-        return (SERVER.recordingSeconds.get() + SERVER.sessionGraceSeconds.get()) * 20;
+    /** Kelonggaran setelah durasi sesi habis sebelum sesi dibatalkan, dalam tick. */
+    public static int sessionGraceTicks() {
+        return SERVER.sessionGraceSeconds.get() * 20;
     }
 
     public static int autoCloseTicks() {
@@ -95,6 +95,14 @@ public final class VoiceDoorConfig {
         return SERVER.logVerificationDetails.get();
     }
 
+    public static String doorPassword() {
+        return SERVER.doorPassword.get().trim();
+    }
+
+    public static boolean hasPassword() {
+        return !doorPassword().isEmpty();
+    }
+
     // -----------------------------------------------------------------------
     // Setter runtime (dipakai command OP)
     // -----------------------------------------------------------------------
@@ -111,6 +119,20 @@ public final class VoiceDoorConfig {
     public static void setThreshold(double value) {
         SERVER.threshold.set(Math.min(Math.max(value, 0.35D), 0.95D));
         SERVER.threshold.save();
+    }
+
+    public static int autoCloseSeconds() {
+        return SERVER.autoCloseSeconds.get();
+    }
+
+    public static void setAutoCloseSeconds(int seconds) {
+        SERVER.autoCloseSeconds.set(Math.max(0, Math.min(seconds, 120)));
+        SERVER.autoCloseSeconds.save();
+    }
+
+    public static void setDoorPassword(String password) {
+        SERVER.doorPassword.set(password == null ? "" : password.trim());
+        SERVER.doorPassword.save();
     }
 
     private static String stripTrailingSlash(String url) {
@@ -137,6 +159,7 @@ public final class VoiceDoorConfig {
         private final ForgeConfigSpec.IntValue readTimeoutSeconds;
         private final ForgeConfigSpec.IntValue maxConcurrentRequests;
         private final ForgeConfigSpec.BooleanValue logVerificationDetails;
+        private final ForgeConfigSpec.ConfigValue<String> doorPassword;
 
         private Server(ForgeConfigSpec.Builder builder) {
             builder.comment("Koneksi ke Python voice API server").push("api");
@@ -160,7 +183,7 @@ public final class VoiceDoorConfig {
 
             readTimeoutSeconds = builder
                     .comment("Batas waktu menunggu balasan verifikasi (detik)")
-                    .defineInRange("readTimeoutSeconds", 20, 1, 300);
+                    .defineInRange("readTimeoutSeconds", 60, 1, 600);
 
             maxConcurrentRequests = builder
                     .comment(
@@ -218,6 +241,18 @@ public final class VoiceDoorConfig {
             logVerificationDetails = builder
                     .comment("Catat skor similarity setiap percobaan ke log server")
                     .define("logVerificationDetails", true);
+
+            builder.pop();
+            builder.comment("Password suara").push("password");
+
+            doorPassword = builder
+                    .comment(
+                            "Password yang harus diucapkan saat verifikasi, selain suara yang cocok.",
+                            "Pemain harus mengucapkan password ini dan suaranya harus cocok.",
+                            "Kosongkan untuk menonaktifkan password.",
+                            "Set dengan: /voicedoor setpassword <password>"
+                    )
+                    .define("password", "kopdes jaya jaya jaya");
 
             builder.pop();
         }

@@ -1,6 +1,8 @@
 {
   "block.voicedoor.voice_door": "Pintu Suara",
   "item.voicedoor.voice_door": "Pintu Suara",
+  "block.voicedoor.kopdes_logo": "Papan Logo Kopdes",
+  "item.voicedoor.kopdes_logo": "Papan Logo Kopdes",
   "itemGroup.voicedoor": "VoiceDoor",
 
   "overlay.voicedoor.recording": "§bBicara sekarang - %s dtk",
@@ -8,6 +10,8 @@
   "overlay.voicedoor.processing": "Memverifikasi suara...",
   "overlay.voicedoor.accepted": "Suara dikenali (%s%%)",
   "overlay.voicedoor.rejected": "Akses ditolak",
+  "overlay.voicedoor.register_ok": "Sample tersimpan (total %s)",
+  "overlay.voicedoor.register_fail": "Gagal menyimpan sample",
 
   "message.voicedoor.no_owner": "Pintu ini belum punya pemilik. Arahkan pandangan ke pintu lalu jalankan /voicedoor register.",
   "message.voicedoor.not_owner": "Hanya pemilik pintu ini yang boleh melakukannya.",
@@ -16,6 +20,9 @@
   "message.voicedoor.session_busy": "Rekaman sedang berjalan. Tunggu sampai selesai.",
   "message.voicedoor.server_busy": "Server suara sedang sibuk. Coba lagi sebentar.",
   "message.voicedoor.door_gone": "Pintunya dibongkar saat kamu sedang berbicara.",
+  "message.voicedoor.door_closed": "Pintu ditutup.",
+  "message.voicedoor.already_claimed": "Pintu ini sudah diklaim oleh pemain lain.",
+  "message.voicedoor.claimed_success": "Pintu berhasil diklaim untuk member: %s",
 
   "message.voicedoor.speak_now": "Bicaralah ke mikrofon selama %s detik...",
   "message.voicedoor.speak_phrase": "Ucapkan ini: §e%s§r (waktu %s detik)",
@@ -47,6 +54,7 @@
   "message.voicedoor.info_api": "Server API: %s",
   "message.voicedoor.info_threshold": "Ambang: %s",
   "message.voicedoor.info_state": "Status: %s",
+  "message.voicedoor.info_voices": "Suara berizin: %s",
   "message.voicedoor.info_allowed": "Pemain berizin: %s",
   "message.voicedoor.state_open": "terbuka (%s dtk lagi)",
   "message.voicedoor.state_closed": "tertutup",
@@ -81,6 +89,8 @@
   "message.voicedoor.reloaded": "API: %s | ambang: %s | rekaman aktif: %s",
 
   "message.voicedoor.help_header": "=== Command VoiceDoor ===",
+  "message.voicedoor.help_claim": "/voicedoor claim [member] - klaim pintu yang dilihat (termasuk pintu garasi Macaw's)",
+  "message.voicedoor.help_unclaim": "/voicedoor unclaim - hapus proteksi VoiceDoor dan jadikan pintu manual biasa",
   "message.voicedoor.help_register": "/voicedoor register [nama] - rekam sample suara untuk pintu yang dilihat",
   "message.voicedoor.help_info": "/voicedoor info - tampilkan detail pintu itu",
   "message.voicedoor.help_status": "/voicedoor status - cek server suara",
@@ -93,5 +103,8 @@
   "message.voicedoor.help_setowner": "/voicedoor setowner <pemain> - pindahkan kepemilikan pintu",
   "message.voicedoor.help_clearowner": "/voicedoor clearowner - hapus pemilik",
   "message.voicedoor.help_enroll": "/voicedoor enroll <member> - bangun ulang voiceprint dari sample tersimpan",
-  "message.voicedoor.help_reload": "/voicedoor reload - tampilkan konfigurasi yang berlaku"
+  "message.voicedoor.help_reload": "/voicedoor reload - tampilkan konfigurasi yang berlaku",
+  "message.voicedoor.help_registerfile": "/voicedoor registerfile <member> [folder] - daftarkan file audio (.ogg/.wav/.mp3/.flac) dari dataset tanpa rekam ulang (folder default: voice/data/raw/<member>/)",
+  "message.voicedoor.help_password": "/voicedoor password <on|off|status|toggle> [kata] - hidupkan/matikan/cek status kata sandi",
+  "message.voicedoor.help_setpassword": "/voicedoor setpassword <password> - atur kata sandi suara yang harus diucapkan (default: 'kopdes jaya jaya jaya')"
 }

@@ -15,4 +15,10 @@ public class ModBlockEntities {
             BLOCK_ENTITIES.register("voice_door",
                     () -> BlockEntityType.Builder.of(VoiceDoorBlockEntity::new,
                             ModBlocks.VOICE_DOOR.get()).build(null));
+
+    public static final RegistryObject<BlockEntityType<KopdesLogoBlockEntity>> KOPDES_LOGO =
+            BLOCK_ENTITIES.register("kopdes_logo",
+                    () -> BlockEntityType.Builder.of(KopdesLogoBlockEntity::new,
+                            ModBlocks.KOPDES_LOGO.get()).build(null));
 }
+

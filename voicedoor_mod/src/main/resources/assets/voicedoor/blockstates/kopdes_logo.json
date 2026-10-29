@@ -1,0 +1,8 @@
+{
+  "variants": {
+    "facing=north": { "model": "voicedoor:block/kopdes_logo" },
+    "facing=east":  { "model": "voicedoor:block/kopdes_logo" },
+    "facing=south": { "model": "voicedoor:block/kopdes_logo" },
+    "facing=west":  { "model": "voicedoor:block/kopdes_logo" }
+  }
+}

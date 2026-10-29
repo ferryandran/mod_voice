@@ -19,7 +19,7 @@ from src.embeddings import ECAPA_DIM, is_available as ecapa_available  # noqa: E
 from src.preprocess import SAMPLE_RATE, save_wav  # noqa: E402
 from src.verify import (  # noqa: E402
     DEFAULT_VERIFY_THRESHOLD,
-    MIN_ENROLL_SEGMENTS,
+    MIN_ENROLL_FILES,
     EnrollmentError,
     EnrollmentStore,
     MemberEnrollment,
@@ -211,7 +211,7 @@ def test_enroll_then_verify_same_voice(data_dir, models_dir, voice_a, write_samp
     enrollment = store.enroll("Budi", data_dir)
 
     assert enrollment.n_files == 3
-    assert enrollment.n_segments >= MIN_ENROLL_SEGMENTS
+    assert enrollment.n_segments == MIN_ENROLL_FILES  # one whole-utterance embedding per file
     assert enrollment.centroid.shape == (ECAPA_DIM,)
     assert np.linalg.norm(enrollment.centroid) == pytest.approx(1.0, abs=1e-4)
 

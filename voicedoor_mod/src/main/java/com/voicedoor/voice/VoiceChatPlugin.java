@@ -4,6 +4,7 @@ import com.voicedoor.VoiceDoorMod;
 import com.voicedoor.blockentity.VoiceDoorBlockEntity;
 import com.voicedoor.config.VoiceDoorConfig;
 import com.voicedoor.network.ModNetwork;
+import com.voicedoor.network.S2CAudioLevelPacket;
 import com.voicedoor.network.S2CStatusPacket;
 import de.maxhenkel.voicechat.api.ForgeVoicechatPlugin;
 import de.maxhenkel.voicechat.api.VoicechatApi;
@@ -117,6 +118,20 @@ public class VoiceChatPlugin implements VoicechatPlugin {
         short[] pcm = session.decode(event.getPacket().getOpusEncodedData());
         if (pcm != null && pcm.length > 0) {
             session.append(pcm);
+
+            long now = System.currentTimeMillis();
+            if (now - session.lastAudioLevelSendTime >= 50) { // ~20 fps streaming
+                session.lastAudioLevelSendTime = now;
+                long sum = 0;
+                for (short sample : pcm) {
+                    sum += Math.abs(sample);
+                }
+                float avg = (float) sum / pcm.length;
+                float level = Math.min(1.0f, avg / 6000.0f);
+                if (session.player != null && !session.player.hasDisconnected()) {
+                    ModNetwork.sendTo(session.player, new S2CAudioLevelPacket(level));
+                }
+            }
         }
 
         if (session.isDurationReached()) {
@@ -156,7 +171,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
                 finishSession(entry.getKey(), session);
                 continue;
             }
-            if (session.ticksAlive >= VoiceDoorConfig.sessionTimeoutTicks()) {
+            if (session.ticksAlive >= session.timeoutTicks) {
                 expired.add(entry.getKey());
                 abandonSession(session);
             }
@@ -176,11 +191,8 @@ public class VoiceChatPlugin implements VoicechatPlugin {
 
         boolean gotSomething = session.bufferedBytes() > 0;
         session.finished = true;
-        runOnServer(session.level, () -> {
-            ModNetwork.sendTo(player, S2CStatusPacket.recordingStop());
-            player.sendSystemMessage(Component.translatable(
-                    gotSomething ? "message.voicedoor.too_little_audio" : "message.voicedoor.no_audio"));
-        });
+        runOnServer(session.level, () -> notifyNoUsableAudio(session, player,
+                gotSomething ? "message.voicedoor.too_little_audio" : "message.voicedoor.no_audio"));
         VoiceDoorMod.LOGGER.debug("[VoiceDoor] Sesi {} dibatalkan (buffer {} byte).",
                 session.playerUUID, session.bufferedBytes());
     }
@@ -198,10 +210,8 @@ public class VoiceChatPlugin implements VoicechatPlugin {
             session.release();
             ServerPlayer player = session.player;
             if (player != null && !player.hasDisconnected()) {
-                runOnServer(session.level, () -> {
-                    ModNetwork.sendTo(player, S2CStatusPacket.recordingStop());
-                    player.sendSystemMessage(Component.translatable("message.voicedoor.too_little_audio"));
-                });
+                runOnServer(session.level, () ->
+                        notifyNoUsableAudio(session, player, "message.voicedoor.too_little_audio"));
             }
             return;
         }
@@ -216,6 +226,11 @@ public class VoiceChatPlugin implements VoicechatPlugin {
         String memberName = session.memberName;
 
         runOnServer(level, () -> {
+            if (session.callback != null) {
+                session.callback.onRecorded(player, wav, level, doorPos,
+                        registering ? memberName : challengeId, registering);
+                return;
+            }
             BlockEntity be = level.getBlockEntity(doorPos);
             if (!(be instanceof VoiceDoorBlockEntity door)) {
                 // Pintunya dibongkar saat pemain berbicara.
@@ -232,6 +247,16 @@ public class VoiceChatPlugin implements VoicechatPlugin {
         });
     }
 
+    private static void notifyNoUsableAudio(ActiveSession session, ServerPlayer player, String messageKey) {
+        Component message = Component.translatable(messageKey);
+        ModNetwork.sendTo(player, S2CStatusPacket.recordingStop());
+        player.sendSystemMessage(message);
+        // GUI registrasi menunggu hasil; tanpa ini ia tertahan di "Menyimpan...".
+        if (session.registering) {
+            ModNetwork.sendTo(player, S2CStatusPacket.registerFail(message.getString()));
+        }
+    }
+
     private static void runOnServer(Level level, Runnable action) {
         if (level instanceof ServerLevel serverLevel) {
             serverLevel.getServer().execute(action);
@@ -239,16 +264,29 @@ public class VoiceChatPlugin implements VoicechatPlugin {
     }
 
     // -----------------------------------------------------------------------
+    // Callback interface
+    // -----------------------------------------------------------------------
+    @FunctionalInterface
+    public interface VoiceSessionCallback {
+        void onRecorded(ServerPlayer player, byte[] wav, Level level, BlockPos pos,
+                        String challengeOrMember, boolean registering);
+    }
+
+    // -----------------------------------------------------------------------
     // API untuk block entity dan command
     // -----------------------------------------------------------------------
     /**
-     * Mulai sesi rekaman untuk {@code player}, terikat ke pintu di {@code doorPos}.
-     *
-     * <p>Sesi lama pemain yang sama dibatalkan lebih dulu, bukan sekadar ditimpa, supaya
-     * pemain mendapat pemberitahuan dan tidak ada callback yang menggantung.
+     * Mulai sesi rekaman khusus dengan callback kustom (dipakai untuk Garage Door).
      */
-    public static void startSession(ServerPlayer player, Level level, BlockPos doorPos,
-                                    boolean registering, String challengeId) {
+    public static void startCustomSession(ServerPlayer player, Level level, BlockPos doorPos,
+                                          boolean registering, String challengeId,
+                                          VoiceSessionCallback callback) {
+        startCustomSession(player, level, doorPos, registering, challengeId, VoiceDoorConfig.recordingMillis(), callback);
+    }
+
+    public static void startCustomSession(ServerPlayer player, Level level, BlockPos doorPos,
+                                          boolean registering, String challengeId, int durationMs,
+                                          VoiceSessionCallback callback) {
         UUID uuid = player.getUUID();
         ActiveSession previous = ACTIVE_SESSIONS.remove(uuid);
         if (previous != null) {
@@ -258,7 +296,37 @@ public class VoiceChatPlugin implements VoicechatPlugin {
         }
 
         ActiveSession session = new ActiveSession(uuid, player, level, doorPos, registering,
-                challengeId, VoiceDoorConfig.recordingMillis());
+                challengeId, durationMs);
+        session.callback = callback;
+        ACTIVE_SESSIONS.put(uuid, session);
+        VoiceDoorMod.LOGGER.debug("[VoiceDoor] Sesi custom {} dimulai untuk {} di {}",
+                registering ? "registrasi" : "verifikasi", player.getName().getString(),
+                doorPos.toShortString());
+    }
+
+    /**
+     * Mulai sesi rekaman untuk {@code player}, terikat ke pintu di {@code doorPos}.
+     *
+     * <p>Sesi lama pemain yang sama dibatalkan lebih dulu, bukan sekadar ditimpa, supaya
+     * pemain mendapat pemberitahuan dan tidak ada callback yang menggantung.
+     */
+    public static void startSession(ServerPlayer player, Level level, BlockPos doorPos,
+                                    boolean registering, String challengeId) {
+        startSession(player, level, doorPos, registering, challengeId, VoiceDoorConfig.recordingMillis());
+    }
+
+    public static void startSession(ServerPlayer player, Level level, BlockPos doorPos,
+                                    boolean registering, String challengeId, int durationMs) {
+        UUID uuid = player.getUUID();
+        ActiveSession previous = ACTIVE_SESSIONS.remove(uuid);
+        if (previous != null) {
+            previous.finished = true;
+            previous.release();
+            VoiceDoorMod.LOGGER.debug("[VoiceDoor] Sesi lama {} diganti sesi baru.", uuid);
+        }
+
+        ActiveSession session = new ActiveSession(uuid, player, level, doorPos, registering,
+                challengeId, durationMs);
         ACTIVE_SESSIONS.put(uuid, session);
         VoiceDoorMod.LOGGER.debug("[VoiceDoor] Sesi {} dimulai untuk {} di {}",
                 registering ? "registrasi" : "verifikasi", player.getName().getString(),
@@ -268,6 +336,11 @@ public class VoiceChatPlugin implements VoicechatPlugin {
     /** Varian untuk registrasi, yang memakai nama member alih-alih challenge. */
     public static void startRegistrationSession(ServerPlayer player, Level level, BlockPos doorPos,
                                                 String memberName) {
+        startRegistrationSession(player, level, doorPos, memberName, VoiceDoorConfig.recordingMillis());
+    }
+
+    public static void startRegistrationSession(ServerPlayer player, Level level, BlockPos doorPos,
+                                                String memberName, int durationMs) {
         UUID uuid = player.getUUID();
         ActiveSession previous = ACTIVE_SESSIONS.remove(uuid);
         if (previous != null) {
@@ -275,7 +348,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
             previous.release();
         }
         ActiveSession session = new ActiveSession(uuid, player, level, doorPos, true,
-                "", VoiceDoorConfig.recordingMillis());
+                "", durationMs);
         session.memberName = memberName;
         ACTIVE_SESSIONS.put(uuid, session);
     }
@@ -283,6 +356,19 @@ public class VoiceChatPlugin implements VoicechatPlugin {
     public static boolean hasActiveSession(UUID playerUUID) {
         ActiveSession session = ACTIVE_SESSIONS.get(playerUUID);
         return session != null && !session.finished;
+    }
+
+    /**
+     * Menghentikan sesi rekaman secara manual (misal saat pemain menekan tombol STOP di GUI).
+     * Sesi langsung difinalisasi dan diproses tanpa menunggu batas waktu.
+     */
+    public static boolean stopSessionManually(UUID playerUUID) {
+        ActiveSession session = ACTIVE_SESSIONS.get(playerUUID);
+        if (session != null && !session.finished) {
+            finishSession(playerUUID, session);
+            return true;
+        }
+        return false;
     }
 
     public static void cancelSession(UUID playerUUID) {
@@ -318,10 +404,18 @@ public class VoiceChatPlugin implements VoicechatPlugin {
         final String challengeId;
         final long startTimeMs;
         final int durationMs;
+        /**
+         * Batas umur sesi: durasinya sendiri + kelonggaran. Dulu memakai
+         * {@code recordingSeconds} global, sehingga sesi GUI 20 detik ikut dibatalkan
+         * setelah 4 + 8 = 12 detik.
+         */
+        final int timeoutTicks;
 
         String memberName = "";
+        VoiceSessionCallback callback = null;
         volatile boolean finished = false;
         int ticksAlive = 0;
+        long lastAudioLevelSendTime = 0;
 
         /** Byte PCM little-endian mentah; header WAV ditambahkan saat selesai. */
         private final ByteArrayOutputStream pcm = new ByteArrayOutputStream(64 * 1024);
@@ -343,6 +437,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
             this.registering = registering;
             this.challengeId = challengeId == null ? "" : challengeId;
             this.durationMs = durationMs;
+            this.timeoutTicks = durationMs / 50 + VoiceDoorConfig.sessionGraceTicks();
             this.startTimeMs = System.currentTimeMillis();
         }
 

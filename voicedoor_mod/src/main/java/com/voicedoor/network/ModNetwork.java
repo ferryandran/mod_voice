@@ -39,13 +39,47 @@ public final class ModNetwork {
                 .decoder(S2CStatusPacket::decode)
                 .consumerMainThread(S2CStatusPacket::handle)
                 .add();
+
+        CHANNEL.messageBuilder(S2COpenVoiceScreenPacket.class, packetId++, NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(S2COpenVoiceScreenPacket::encode)
+                .decoder(S2COpenVoiceScreenPacket::decode)
+                .consumerMainThread(S2COpenVoiceScreenPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(C2SVoiceActionPacket.class, packetId++, NetworkDirection.PLAY_TO_SERVER)
+                .encoder(C2SVoiceActionPacket::encode)
+                .decoder(C2SVoiceActionPacket::decode)
+                .consumerMainThread(C2SVoiceActionPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(S2COpenRegisterScreenPacket.class, packetId++, NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(S2COpenRegisterScreenPacket::encode)
+                .decoder(S2COpenRegisterScreenPacket::decode)
+                .consumerMainThread(S2COpenRegisterScreenPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(S2CAudioLevelPacket.class, packetId++, NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(S2CAudioLevelPacket::encode)
+                .decoder(S2CAudioLevelPacket::decode)
+                .consumerMainThread(S2CAudioLevelPacket::handle)
+                .add();
     }
 
-    /** Kirim satu paket status ke satu pemain. Aman dipanggil untuk pemain tanpa mod. */
-    public static void sendTo(ServerPlayer player, S2CStatusPacket packet) {
+    /** Apakah client pemain ini memasang mod (dan bisa membuka GUI). */
+    public static boolean hasModInstalled(ServerPlayer player) {
+        return player != null && CHANNEL.isRemotePresent(player.connection.connection);
+    }
+
+    /** Kirim paket ke satu pemain (Server -> Client). */
+    public static void sendTo(ServerPlayer player, Object packet) {
         if (player == null) {
             return;
         }
         CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), packet);
+    }
+
+    /** Kirim paket ke server (Client -> Server). */
+    public static void sendToServer(Object packet) {
+        CHANNEL.sendToServer(packet);
     }
 }

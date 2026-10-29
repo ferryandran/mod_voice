@@ -11,6 +11,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
+import net.minecraft.ChatFormatting;
 import net.minecraft.network.Connection;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
@@ -102,6 +103,89 @@ public class VoiceDoorBlockEntity extends BlockEntity {
             return;
         }
 
+        // Buka GUI Screen untuk pemain
+        ModNetwork.sendTo(player, new com.voicedoor.network.S2COpenVoiceScreenPacket(pos, false, ownerName, ""));
+    }
+
+    public static void startSessionFromGui(ServerPlayer player, BlockPos pos) {
+        Level level = player.level();
+        BlockEntity be = level.getBlockEntity(pos);
+        VoiceDoorBlockEntity door = null;
+        if (be instanceof VoiceDoorBlockEntity d) {
+            door = d;
+        } else {
+            BlockEntity below = level.getBlockEntity(pos.below());
+            if (below instanceof VoiceDoorBlockEntity d) {
+                door = d;
+            }
+        }
+        if (door != null) {
+            door.startVerificationSession(player, pos, level, true);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Registrasi lewat GUI
+    // -----------------------------------------------------------------------
+    /** Durasi maksimum satu sample dari GUI; batas buffer VoiceChatPlugin adalah 20 detik. */
+    public static final int GUI_MAX_RECORDING_MS = 20000;
+
+    /** Berapa lama GUI registrasi boleh dipakai merekam setelah command dijalankan. */
+    private static final long REGISTRATION_GRANT_MS = 10 * 60 * 1000L;
+
+    private record RegistrationGrant(BlockPos pos, String memberName, long expiresAtMs) {
+    }
+
+    /**
+     * Izin registrasi yang sudah lolos pengecekan di {@code /voicedoor register}.
+     *
+     * <p>Nama member disimpan di sini, bukan dikirim balik oleh client, supaya paket
+     * {@code REGISTER_START} buatan sendiri tidak bisa dipakai mendaftarkan suara ke nama
+     * orang lain.
+     */
+    private static final Map<UUID, RegistrationGrant> REGISTRATION_GRANTS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Simpan izin registrasi lalu buka GUI registrasi di client pemain. */
+    public static void openRegistrationScreen(ServerPlayer player, BlockPos pos, String memberName) {
+        REGISTRATION_GRANTS.put(player.getUUID(), new RegistrationGrant(pos.immutable(), memberName,
+                System.currentTimeMillis() + REGISTRATION_GRANT_MS));
+        ModNetwork.sendTo(player, new com.voicedoor.network.S2COpenRegisterScreenPacket(
+                pos, memberName, GUI_MAX_RECORDING_MS / 1000));
+    }
+
+    public static void startRegistrationFromGui(ServerPlayer player, BlockPos pos) {
+        RegistrationGrant grant = REGISTRATION_GRANTS.get(player.getUUID());
+        if (grant == null || !grant.pos().equals(pos) || System.currentTimeMillis() > grant.expiresAtMs()) {
+            REGISTRATION_GRANTS.remove(player.getUUID());
+            ModNetwork.sendTo(player, S2CStatusPacket.registerFail(
+                    "Sesi registrasi kedaluwarsa. Jalankan /voicedoor register lagi."));
+            return;
+        }
+        if (!VoiceDoorMod.VOICE_CHAT_AVAILABLE) {
+            ModNetwork.sendTo(player, S2CStatusPacket.registerFail(
+                    Component.translatable("message.voicedoor.no_voicechat").getString()));
+            return;
+        }
+        if (VoiceChatPlugin.hasActiveSession(player.getUUID())) {
+            ModNetwork.sendTo(player, S2CStatusPacket.registerFail(
+                    Component.translatable("message.voicedoor.session_busy").getString()));
+            return;
+        }
+
+        Level level = player.level();
+        if (!(level.getBlockEntity(pos) instanceof VoiceDoorBlockEntity)) {
+            ModNetwork.sendTo(player, S2CStatusPacket.registerFail(
+                    Component.translatable("message.voicedoor.door_gone").getString()));
+            return;
+        }
+        VoiceChatPlugin.startRegistrationSession(player, level, pos, grant.memberName(), GUI_MAX_RECORDING_MS);
+        ModNetwork.sendTo(player, S2CStatusPacket.recordingStart("", GUI_MAX_RECORDING_MS / 1000));
+    }
+
+    public void startVerificationSession(ServerPlayer player, BlockPos pos, Level level, boolean fromGui) {
+        UUID playerUUID = player.getUUID();
+        if (ownerUUID == null || ownerName.isEmpty()) return;
+
         Integer cooldown = verificationCooldowns.get(playerUUID);
         if (cooldown != null && cooldown > 0) {
             player.sendSystemMessage(Component.translatable(
@@ -122,21 +206,17 @@ public class VoiceDoorBlockEntity extends BlockEntity {
         verificationCooldowns.put(playerUUID, VoiceDoorConfig.cooldownTicks());
 
         if (!VoiceDoorConfig.requireChallenge()) {
-            // Server API dijalankan dengan --no-challenge: rekam langsung.
-            beginRecording(player, pos, level, "", "");
+            beginRecording(player, pos, level, "", "", fromGui);
             return;
         }
 
-        requestChallengeThenRecord(player, pos, level);
+        requestChallengeThenRecord(player, pos, level, fromGui);
     }
 
     /**
      * Minta challenge sekali-pakai, lalu mulai merekam.
-     *
-     * <p>Rekaman sengaja baru dimulai setelah server menjawab: kalau direkam lebih dulu
-     * dan challenge gagal, pemain sudah berbicara untuk apa-apa.
      */
-    private void requestChallengeThenRecord(ServerPlayer player, BlockPos pos, Level level) {
+    private void requestChallengeThenRecord(ServerPlayer player, BlockPos pos, Level level, boolean fromGui) {
         String member = ownerName;
         boolean queued = VoiceApiClient.tryPostJsonAsync(
                 "/challenge",
@@ -158,7 +238,7 @@ public class VoiceDoorBlockEntity extends BlockEntity {
                     String phrase = response.optBoolean("require_passphrase", false)
                             ? response.optString("phrase", "")
                             : "";
-                    beginRecording(player, pos, level, challengeId, phrase);
+                    beginRecording(player, pos, level, challengeId, phrase, fromGui);
                 }));
 
         if (!queued) {
@@ -168,17 +248,19 @@ public class VoiceDoorBlockEntity extends BlockEntity {
     }
 
     private void beginRecording(ServerPlayer player, BlockPos pos, Level level,
-                                String challengeId, String phrase) {
-        VoiceChatPlugin.startSession(player, level, pos, false, challengeId);
+                                String challengeId, String phrase, boolean fromGui) {
+        int maxDurationMs = fromGui ? 20000 : VoiceDoorConfig.recordingMillis();
+        VoiceChatPlugin.startSession(player, level, pos, false, challengeId, maxDurationMs);
 
+        int seconds = maxDurationMs / 1000;
         if (phrase.isEmpty()) {
             player.sendSystemMessage(Component.translatable(
-                    "message.voicedoor.speak_now", VoiceDoorConfig.recordingSeconds()));
+                    "message.voicedoor.speak_now", seconds));
         } else {
             player.sendSystemMessage(Component.translatable(
-                    "message.voicedoor.speak_phrase", phrase, VoiceDoorConfig.recordingSeconds()));
+                    "message.voicedoor.speak_phrase", phrase, seconds));
         }
-        ModNetwork.sendTo(player, S2CStatusPacket.recordingStart(phrase, VoiceDoorConfig.recordingSeconds()));
+        ModNetwork.sendTo(player, S2CStatusPacket.recordingStart(phrase, seconds));
     }
 
     // -----------------------------------------------------------------------
@@ -205,13 +287,21 @@ public class VoiceDoorBlockEntity extends BlockEntity {
             boolean accepted = response.isSuccess() && response.optBoolean("accepted",
                     response.optBoolean("is_owner", false));
             double similarity = response.optDouble("similarity", response.optDouble("confidence", 0.0));
+            boolean voiceOk = response.has("voice_ok")
+                    ? response.optBoolean("voice_ok", false)
+                    : (similarity >= VoiceDoorConfig.threshold());
+            boolean passwordOk = response.optBoolean("password_ok", true);
+            String detectedSpeaker = response.optString("detected_speaker",
+                    response.optString("speaker", ownerName));
+            String transcript = response.optString("transcript", "");
 
             if (VoiceDoorConfig.logVerificationDetails()) {
                 VoiceDoorMod.LOGGER.info(
-                        "[VoiceDoor] {} di {} -> accepted={} similarity={} status={}",
+                        "[VoiceDoor] {} di {} -> accepted={} voice_ok={} password_ok={} similarity={} speaker={} transcript=\"{}\" status={}",
                         player.getName().getString(), doorPos.toShortString(),
-                        accepted, String.format(java.util.Locale.ROOT, "%.4f", similarity),
-                        response.statusCode());
+                        accepted, voiceOk, passwordOk,
+                        String.format(java.util.Locale.ROOT, "%.4f", similarity),
+                        detectedSpeaker, transcript, response.statusCode());
             }
 
             if (accepted) {
@@ -219,23 +309,56 @@ public class VoiceDoorBlockEntity extends BlockEntity {
                         "message.voicedoor.accepted",
                         response.optString("member", ownerName),
                         String.format(java.util.Locale.ROOT, "%.0f", similarity * 100)));
-                ModNetwork.sendTo(player, S2CStatusPacket.verificationOk(similarity));
+                if (transcript != null && !transcript.trim().isEmpty()) {
+                    player.sendSystemMessage(Component.literal("  [Terdengar: \"" + transcript + "\"]")
+                            .withStyle(ChatFormatting.AQUA));
+                }
+                ModNetwork.sendTo(player, S2CStatusPacket.verificationResult(
+                        true, similarity, detectedSpeaker, transcript, voiceOk, passwordOk, ""));
                 openDoor(level, doorPos);
             } else {
                 String reason = response.isSuccess()
-                        ? Component.translatable("message.voicedoor.reason_low_score",
-                                String.format(java.util.Locale.ROOT, "%.0f", similarity * 100),
-                                String.format(java.util.Locale.ROOT, "%.0f", VoiceDoorConfig.threshold() * 100))
-                            .getString()
+                        ? buildRejectionReason(similarity, voiceOk, passwordOk, transcript)
                         : response.errorMessage();
                 player.sendSystemMessage(Component.translatable("message.voicedoor.rejected", reason));
-                ModNetwork.sendTo(player, S2CStatusPacket.verificationFail(reason));
+                if (transcript != null && !transcript.trim().isEmpty()) {
+                    player.sendSystemMessage(Component.literal("  [Terdengar: \"" + transcript + "\"]")
+                            .withStyle(ChatFormatting.YELLOW));
+                }
+                ModNetwork.sendTo(player, S2CStatusPacket.verificationResult(
+                        false, similarity, detectedSpeaker, transcript, voiceOk, passwordOk, reason));
             }
         }));
 
         if (!queued) {
             player.sendSystemMessage(Component.translatable("message.voicedoor.server_busy"));
         }
+    }
+
+    /**
+     * Bangun pesan penolakan yang menjelaskan secara detail apa yang salah:
+     * suaranya, passwordnya, atau keduanya.
+     */
+    public static String buildRejectionReason(double similarity, boolean voiceOk, boolean passwordOk,
+                                              String transcript) {
+        StringBuilder reason = new StringBuilder();
+        double threshold = VoiceDoorConfig.threshold();
+        if (similarity < threshold) {
+            reason.append(Component.translatable("message.voicedoor.reason_low_score",
+                    String.format(java.util.Locale.ROOT, "%.0f", similarity * 100),
+                    String.format(java.util.Locale.ROOT, "%.0f", threshold * 100))
+                    .getString());
+        } else if (!voiceOk) {
+            reason.append("Suara bukan member/pemilik pintu");
+        }
+        if (!passwordOk) {
+            if (reason.length() > 0) reason.append(" | ");
+            reason.append("Password salah");
+        }
+        if (reason.length() == 0) {
+            reason.append("Verifikasi gagal");
+        }
+        return reason.toString();
     }
 
     /** Kirim audio ke {@code /register} untuk mendaftarkan atau memperkuat voiceprint. */
@@ -254,6 +377,7 @@ public class VoiceDoorBlockEntity extends BlockEntity {
             if (!response.isSuccess()) {
                 player.sendSystemMessage(Component.translatable(
                         "message.voicedoor.register_failed", response.errorMessage()));
+                ModNetwork.sendTo(player, S2CStatusPacket.registerFail(response.errorMessage()));
                 return;
             }
 
@@ -265,6 +389,18 @@ public class VoiceDoorBlockEntity extends BlockEntity {
 
             boolean enrolled = response.optBoolean("enrolled", false);
             String hint = response.optString("hint", "");
+
+            StringBuilder summary = new StringBuilder(String.format(java.util.Locale.ROOT,
+                    "%.1f detik tersimpan", duration));
+            if (response.body() != null && response.body().get("enrollment") instanceof com.google.gson.JsonObject e
+                    && e.get("cohesion") != null && e.get("cohesion").isJsonPrimitive()) {
+                summary.append(String.format(java.util.Locale.ROOT, " | kohesi %.2f",
+                        e.get("cohesion").getAsDouble()));
+            }
+            if (!hint.isEmpty()) {
+                summary.append(" | ").append(hint);
+            }
+            ModNetwork.sendTo(player, S2CStatusPacket.registerOk(summary.toString(), samples));
             if (enrolled) {
                 player.sendSystemMessage(Component.translatable("message.voicedoor.enrolled", member));
             } else if (!hint.isEmpty()) {

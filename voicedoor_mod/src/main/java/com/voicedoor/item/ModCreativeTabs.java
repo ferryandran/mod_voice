@@ -29,7 +29,10 @@ public final class ModCreativeTabs {
             () -> CreativeModeTab.builder()
                     .title(Component.translatable("itemGroup.voicedoor"))
                     .icon(() -> new ItemStack(ModItems.VOICE_DOOR.get()))
-                    .displayItems((params, output) -> output.accept(ModItems.VOICE_DOOR.get()))
+                    .displayItems((params, output) -> {
+                        output.accept(ModItems.VOICE_DOOR.get());
+                        output.accept(ModItems.KOPDES_LOGO.get());
+                    })
                     .build());
 
     private ModCreativeTabs() {

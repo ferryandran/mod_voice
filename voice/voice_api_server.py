@@ -19,11 +19,14 @@ Endpoint (semua kecuali /health butuh header X-VoiceDoor-Token):
   POST /register        - simpan sample suara, lalu perbarui voiceprint
   POST /enroll          - hitung ulang voiceprint dari sample yang ada
   POST /train           - latih classifier closed-set (hanya untuk UI Streamlit)
+  GET  /password        - lihat password saat ini (masked)
+  POST /password        - ubah password untuk verifikasi
 
 Cara menjalankan:
     python voice_api_server.py                      # 127.0.0.1:5000, token dibuat otomatis
     python voice_api_server.py --host 0.0.0.0       # bisa diakses dari jaringan
     python voice_api_server.py --require-passphrase  # anti-replay kuat (butuh internet)
+    python voice_api_server.py --password "kata sandi"  # atur password kustom
     python voice_api_server.py --no-auth            # HANYA untuk tes lokal
 
 Token disimpan di `.api_token` (sudah di-gitignore) dan dicetak saat start. Isikan
@@ -91,6 +94,7 @@ from src.preprocess import (
 from src.train import MIN_MEMBERS, InsufficientDataError, train_models
 from src.verify import (
     DEFAULT_VERIFY_THRESHOLD,
+    UTTERANCE_MAX_SECONDS,
     EnrollmentError,
     EnrollmentStore,
     NotEnrolledError,
@@ -126,6 +130,13 @@ _auth_required = True
 _verify_threshold = DEFAULT_VERIFY_THRESHOLD
 _transcribe_language = "id-ID"
 _require_challenge = True
+
+# Password: kata sandi yang harus diucapkan pemain selain verifikasi suara.
+# Kosong berarti tanpa password. Default: "kopdes jaya jaya jaya".
+DEFAULT_PASSWORD = "kopdes jaya jaya jaya"
+PASSWORD_MATCH_RATIO = 0.6  # minimal 60% kata harus cocok
+_door_password: str = DEFAULT_PASSWORD
+_password_lock = Lock()
 
 # Classifier closed-set: dipakai UI Streamlit, tidak dipakai pintu.
 _predictor: VoicePredictor | None = None
@@ -254,7 +265,7 @@ def read_audio_bytes() -> bytes:
     return data
 
 
-def decode_audio(audio_bytes: bytes) -> np.ndarray:
+def decode_audio(audio_bytes: bytes, filename: str = "") -> np.ndarray:
     """Decode audio apa pun menjadi float32 mono di SAMPLE_RATE.
 
     Jalur utama memakai librosa lewat file sementara (menangani WAV/MP3/FLAC/OGG).
@@ -264,9 +275,19 @@ def decode_audio(audio_bytes: bytes) -> np.ndarray:
     Helper ini dipakai /register MAUPUN /verify. Sebelumnya hanya /register punya
     fallback, jadi register menerima OGG sementara verify menolaknya.
     """
+    suffix = ".wav"
+    if filename and Path(filename).suffix:
+        suffix = Path(filename).suffix.lower()
+    elif audio_bytes.startswith(b"OggS"):
+        suffix = ".ogg"
+    elif audio_bytes.startswith(b"fLaC"):
+        suffix = ".flac"
+    elif audio_bytes.startswith(b"ID3") or audio_bytes[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        suffix = ".mp3"
+
     tmp_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(audio_bytes)
             tmp_path = Path(tmp.name)
         try:
@@ -376,6 +397,40 @@ def status():
     })
 
 
+@app.route("/password", methods=["GET"])
+@require_token
+def get_password():
+    """Lihat password saat ini."""
+    with _password_lock:
+        current = _door_password
+    return jsonify({
+        "success": True,
+        "password": current,
+        "has_password": bool(current),
+    })
+
+
+@app.route("/password", methods=["POST"])
+@require_token
+def set_password():
+    """Ubah password.
+
+    Request: JSON { "password": "kata baru" }
+             Kirim password kosong untuk menonaktifkan.
+    """
+    body = request.get_json(silent=True) or {}
+    new_password = (request.form.get("password") or body.get("password", "")).strip()
+    with _password_lock:
+        global _door_password
+        _door_password = new_password
+    logger.info("Password diubah menjadi: %s", repr(new_password) if new_password else "(dinonaktifkan)")
+    return jsonify({
+        "success": True,
+        "password": new_password,
+        "message": "Password diperbarui." if new_password else "Password dinonaktifkan.",
+    })
+
+
 @app.route("/challenge", methods=["POST"])
 @require_token
 def challenge():
@@ -390,18 +445,18 @@ def challenge():
         return error("Parameter 'member' diperlukan.")
 
     store = get_store()
-    if not store.has(member):
+    raw_members = [m.strip() for m in member.replace(";", ",").split(",") if m.strip()]
+    valid_members = [store.get(m).name for m in raw_members if store.has(m)]
+    if not valid_members:
         return error(
-            f"'{member}' belum punya voiceprint. Daftarkan suara dulu lewat /register.",
+            f"Tidak ada voiceprint yang terdaftar untuk '{member}'. Daftarkan suara dulu lewat /register.",
             409,
             enrolled_members=store.members,
         )
-    # Satu percobaan buka pintu = satu hitungan. Karena /verify tidak bisa dipanggil
-    # tanpa challenge, cukup dihitung di sini; /verify hanya menghitung sendiri kalau
-    # challenge dimatikan. Kalau keduanya menghitung, kuota efektifnya jadi separuh.
-    if rate_limited(member):
+
+    if any(rate_limited(m) for m in valid_members):
         return error(
-            f"Terlalu banyak percobaan untuk '{member}'. Tunggu "
+            f"Terlalu banyak percobaan untuk salah satu profil di '{member}'. Tunggu "
             f"{int(RATE_LIMIT_WINDOW_SECONDS)} detik.",
             429,
         )
@@ -416,11 +471,11 @@ def challenge():
 @app.route("/verify", methods=["POST"])
 @require_token
 def verify():
-    """Verifikasi suara terhadap satu member.
+    """Verifikasi suara terhadap satu atau beberapa member sekaligus.
 
     Request: multipart/form-data
       - audio           : file audio (WAV/MP3/FLAC/OGG)
-      - member          : nama member yang diklaim  (alias lama: expected_speaker)
+      - member          : nama member yang diklaim (bisa koma: ferry,irfan,riza)
       - challenge_id    : id dari /challenge (wajib kecuali server memakai --no-challenge)
       - threshold       : opsional, hanya boleh LEBIH ketat dari setelan server
 
@@ -439,16 +494,18 @@ def verify():
         return error("Parameter 'member' diperlukan.")
 
     store = get_store()
-    try:
-        store.get(member)
-    except NotEnrolledError as exc:
-        return error(str(exc), 409, enrolled_members=store.members)
-
-    # Sudah dihitung di /challenge. Hitung di sini hanya kalau challenge dimatikan,
-    # supaya /verify tetap terlindungi tanpa mengurangi kuota dua kali per percobaan.
-    if not _require_challenge and rate_limited(member):
+    raw_members = [m.strip() for m in member.replace(";", ",").split(",") if m.strip()]
+    valid_members = [store.get(m).name for m in raw_members if store.has(m)]
+    if not valid_members:
         return error(
-            f"Terlalu banyak percobaan untuk '{member}'. Tunggu "
+            f"Tidak ada voiceprint terdaftar untuk '{member}'.",
+            409,
+            enrolled_members=store.members,
+        )
+
+    if not _require_challenge and any(rate_limited(m) for m in valid_members):
+        return error(
+            f"Terlalu banyak percobaan untuk salah satu profil di '{member}'. Tunggu "
             f"{int(RATE_LIMIT_WINDOW_SECONDS)} detik.",
             429,
         )
@@ -489,9 +546,16 @@ def verify():
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         save_wav(y, tmp_path, SAMPLE_RATE)
-        _, segments = preprocess_file(tmp_path, noise_reduction=True)
+        # Satu ucapan utuh, bukan potongan 2.5 detik - lihat UTTERANCE_MAX_SECONDS.
+        _, segments = preprocess_file(tmp_path, noise_reduction=True,
+                                      segment_seconds=UTTERANCE_MAX_SECONDS)
         X = extract(segments)
-        result = store.verify_segments(X, member, threshold)
+        best_result = None
+        for cand in valid_members:
+            res = store.verify_segments(X, cand, threshold)
+            if best_result is None or res.similarity > best_result.similarity:
+                best_result = res
+        result = best_result
     except AudioProcessingError as exc:
         return error(str(exc))
     except NotEnrolledError as exc:
@@ -530,6 +594,42 @@ def verify():
                 payload["error"] = f"Frasa tidak cocok. Diminta: '{taken.phrase}'."
                 accepted = False
 
+    # -- password door (selalu aktif kalau _door_password diset) -----------
+    with _password_lock:
+        current_password = _door_password
+
+    # Detail speaker untuk GUI: apakah suara cocok?
+    voice_ok = result.accepted
+    payload["voice_ok"] = voice_ok
+    payload["detected_speaker"] = result.member if voice_ok else "Unknown Voice"
+
+    # Selalu transkripsikan apa yang diucapkan agar selalu bisa ditampilkan di GUI dan chat
+    transcript = payload.get("transcript")
+    if transcript is None:
+        transcript = _transcribe_bytes(y, _transcribe_language)
+    payload["transcript"] = transcript if transcript is not None else ""
+
+    if current_password:
+        if transcript is None or not transcript.strip():
+            logger.warning("Password diset tapi transkripsi tidak tersedia - tolak demi aman.")
+            payload["password_ok"] = False
+            payload["expected_password"] = current_password
+            if not payload.get("error"):
+                payload["error"] = ("Password tidak bisa diverifikasi (transkripsi tidak tersedia). "
+                                    "Pastikan server punya koneksi internet.")
+            accepted = False
+        else:
+            ok, ratio = _password_matches(current_password, transcript)
+            payload["password_ok"] = ok
+            payload["password_ratio"] = round(ratio, 3)
+            payload["expected_password"] = current_password
+            if not ok:
+                if not payload.get("error"):
+                    payload["error"] = f"Password tidak cocok. Password yang benar: '{current_password}'."
+                accepted = False
+    else:
+        payload["password_ok"] = True  # tidak ada password = selalu lolos
+
     payload["accepted"] = accepted
     payload["is_owner"] = accepted          # alias kompatibilitas
     payload["speaker"] = result.member if accepted else "Unknown Voice"
@@ -539,10 +639,36 @@ def verify():
         _challenges.remember(digest)
 
     logger.info(
-        "verify member=%s accepted=%s similarity=%.4f threshold=%.2f segments=%d",
-        member, accepted, result.similarity, threshold, result.n_segments,
+        "verify member=%s accepted=%s voice_ok=%s password_ok=%s transcript=%r similarity=%.4f threshold=%.2f segments=%d",
+        member, accepted, voice_ok, payload.get("password_ok"),
+        payload.get("transcript"),
+        result.similarity, threshold, result.n_segments,
     )
     return jsonify(payload)
+
+
+def _normalize_words(text: str) -> list[str]:
+    """Lowercase, strip aksen dan tanda baca, pisah menjadi kata-kata."""
+    import unicodedata
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return [w for w in re.split(r"[^a-z0-9]+", stripped) if w]
+
+
+def _password_matches(password: str, transcript: str) -> tuple[bool, float]:
+    """Cek apakah transcript mengandung kata-kata dari password.
+
+    Returns (passed, ratio). Pencocokan bag-of-words, bukan exact string.
+    """
+    if not password.strip():
+        return True, 1.0
+    expected = _normalize_words(password)
+    if not expected:
+        return True, 1.0
+    spoken = set(_normalize_words(transcript))
+    hits = sum(1 for w in expected if w in spoken)
+    ratio = hits / len(expected)
+    return ratio >= PASSWORD_MATCH_RATIO, ratio
 
 
 def _transcribe_bytes(y: np.ndarray, language: str) -> str | None:
@@ -606,29 +732,35 @@ def register():
         "n_samples": n_samples,
     }
 
-    # Perbarui voiceprint segera, supaya pintu langsung bisa dipakai.
-    store = get_store()
-    try:
-        enrollment = store.enroll(safe, DATA_DIR)
-        payload["enrolled"] = True
-        payload["enrollment"] = {
-            "n_segments": enrollment.n_segments,
-            "n_files": enrollment.n_files,
-            "cohesion": round(enrollment.self_similarity_mean, 4),
-        }
-        if enrollment.self_similarity_mean < 0.55:
-            payload["hint"] = ("Voiceprint tersimpan tapi sample-nya kurang konsisten. "
-                               "Rekam beberapa kali lagi dengan mikrofon dan ruangan yang sama.")
-    except EnrollmentError as exc:
+    # Perbarui voiceprint segera jika auto_enroll aktif (default true untuk single register).
+    # Untuk bulk upload registerfile, auto_enroll=false agar tidak memproses ulang seluruh folder setiap file.
+    auto_enroll = (request.form.get("auto_enroll") or "true").strip().lower() not in ("false", "0", "no")
+    if auto_enroll:
+        store = get_store()
+        try:
+            enrollment = store.enroll(safe, DATA_DIR)
+            payload["enrolled"] = True
+            payload["enrollment"] = {
+                "n_segments": enrollment.n_segments,
+                "n_files": enrollment.n_files,
+                "cohesion": round(enrollment.self_similarity_mean, 4),
+            }
+            if enrollment.self_similarity_mean < 0.55:
+                payload["hint"] = ("Voiceprint tersimpan tapi sample-nya kurang konsisten. "
+                                   "Rekam beberapa kali lagi dengan mikrofon dan ruangan yang sama.")
+        except EnrollmentError as exc:
+            payload["enrolled"] = False
+            payload["hint"] = str(exc)
+        except EmbeddingUnavailableError as exc:
+            payload["enrolled"] = False
+            payload["hint"] = f"Encoder suara tidak tersedia: {exc}"
+        except Exception as exc:
+            logger.exception("Enrollment gagal setelah register")
+            payload["enrolled"] = False
+            payload["hint"] = f"Enrollment gagal: {exc}"
+    else:
         payload["enrolled"] = False
-        payload["hint"] = str(exc)
-    except EmbeddingUnavailableError as exc:
-        payload["enrolled"] = False
-        payload["hint"] = f"Encoder suara tidak tersedia: {exc}"
-    except Exception as exc:
-        logger.exception("Enrollment gagal setelah register")
-        payload["enrolled"] = False
-        payload["hint"] = f"Enrollment gagal: {exc}"
+        payload["hint"] = "Sample tersimpan. Jalankan /enroll setelah selesai mengunggah semua file."
 
     return jsonify(payload)
 
@@ -749,6 +881,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help=f"Ambang cosine similarity (default {DEFAULT_VERIFY_THRESHOLD})")
     p.add_argument("--require-passphrase", action="store_true",
                    help="Wajibkan pemain mengucapkan frasa acak (anti-replay kuat, butuh internet)")
+    p.add_argument("--password", default=DEFAULT_PASSWORD,
+                   help=f"Password yang harus diucapkan (default: '{DEFAULT_PASSWORD}'). "
+                        f"Kosongkan dengan --password '' untuk menonaktifkan.")
     p.add_argument("--language", default="id-ID",
                    help="Bahasa transkripsi frasa, misal id-ID atau en-US")
     p.add_argument("--no-challenge", action="store_true",
@@ -761,7 +896,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global _api_token, _auth_required, _verify_threshold, _require_challenge, _transcribe_language
+    global _api_token, _auth_required, _verify_threshold, _require_challenge, _transcribe_language, _door_password
 
     args = build_arg_parser().parse_args(argv)
 
@@ -769,6 +904,7 @@ def main(argv: list[str] | None = None) -> int:
     _verify_threshold = float(min(max(args.threshold, MIN_ALLOWED_THRESHOLD), MAX_ALLOWED_THRESHOLD))
     _require_challenge = not args.no_challenge
     _transcribe_language = args.language
+    _door_password = args.password.strip() if args.password else ""
     _challenges.require_passphrase = args.require_passphrase
     _challenges.language = args.language
 
@@ -786,6 +922,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Threshold       : %.2f (client hanya boleh minta lebih ketat)", _verify_threshold)
     logger.info("Challenge       : %s", "wajib" if _require_challenge else "DIMATIKAN")
     logger.info("Passphrase      : %s", "wajib" if args.require_passphrase else "tidak")
+    logger.info("Password        : %s", repr(_door_password) if _door_password else "(tidak aktif)")
     logger.info("Member enrolled : %s", ", ".join(store.members) or "(belum ada)")
     logger.info("Data dir        : %s", DATA_DIR)
     logger.info("Models dir      : %s", MODELS_DIR)

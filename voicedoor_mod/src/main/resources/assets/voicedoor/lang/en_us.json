@@ -1,6 +1,8 @@
 {
   "block.voicedoor.voice_door": "Voice Door",
   "item.voicedoor.voice_door": "Voice Door",
+  "block.voicedoor.kopdes_logo": "Kopdes Logo Plaque",
+  "item.voicedoor.kopdes_logo": "Kopdes Logo Plaque",
   "itemGroup.voicedoor": "VoiceDoor",
 
   "overlay.voicedoor.recording": "§bSpeak now - %s s",
@@ -8,6 +10,8 @@
   "overlay.voicedoor.processing": "Verifying voice...",
   "overlay.voicedoor.accepted": "Voice recognized (%s%%)",
   "overlay.voicedoor.rejected": "Access denied",
+  "overlay.voicedoor.register_ok": "Sample saved (%s total)",
+  "overlay.voicedoor.register_fail": "Failed to save sample",
 
   "message.voicedoor.no_owner": "This door has no owner yet. Look at it and run /voicedoor register to claim it.",
   "message.voicedoor.not_owner": "Only the owner of this door can do that.",
@@ -16,6 +20,9 @@
   "message.voicedoor.session_busy": "A recording is already in progress. Wait for it to finish.",
   "message.voicedoor.server_busy": "The voice server is busy right now. Try again in a moment.",
   "message.voicedoor.door_gone": "The door was removed while you were speaking.",
+  "message.voicedoor.door_closed": "Door closed.",
+  "message.voicedoor.already_claimed": "This door is already claimed by someone else.",
+  "message.voicedoor.claimed_success": "Door claimed successfully for member: %s",
 
   "message.voicedoor.speak_now": "Speak into your microphone for %s seconds...",
   "message.voicedoor.speak_phrase": "Say this out loud: §e%s§r (you have %s seconds)",
@@ -47,6 +54,7 @@
   "message.voicedoor.info_api": "API server: %s",
   "message.voicedoor.info_threshold": "Threshold: %s",
   "message.voicedoor.info_state": "State: %s",
+  "message.voicedoor.info_voices": "Allowed voices: %s",
   "message.voicedoor.info_allowed": "Allowed players: %s",
   "message.voicedoor.state_open": "open (%s s left)",
   "message.voicedoor.state_closed": "closed",
@@ -81,6 +89,8 @@
   "message.voicedoor.reloaded": "API: %s | threshold: %s | active recordings: %s",
 
   "message.voicedoor.help_header": "=== VoiceDoor commands ===",
+  "message.voicedoor.help_claim": "/voicedoor claim [member] - claim the door you are looking at (including Macaw's garage door)",
+  "message.voicedoor.help_unclaim": "/voicedoor unclaim - remove VoiceDoor protection and restore to regular door",
   "message.voicedoor.help_register": "/voicedoor register [name] - record a voice sample for the door you are looking at",
   "message.voicedoor.help_info": "/voicedoor info - show details about that door",
   "message.voicedoor.help_status": "/voicedoor status - check the voice server",
@@ -93,5 +103,8 @@
   "message.voicedoor.help_setowner": "/voicedoor setowner <player> - reassign the door",
   "message.voicedoor.help_clearowner": "/voicedoor clearowner - remove the owner",
   "message.voicedoor.help_enroll": "/voicedoor enroll <member> - rebuild a voiceprint from stored samples",
-  "message.voicedoor.help_reload": "/voicedoor reload - show the effective configuration"
+  "message.voicedoor.help_reload": "/voicedoor reload - show the effective configuration",
+  "message.voicedoor.help_registerfile": "/voicedoor registerfile <member> [folder] - register pre-recorded audio files (.ogg/.wav/.mp3/.flac) from dataset without re-recording (default folder: voice/data/raw/<member>/)",
+  "message.voicedoor.help_password": "/voicedoor password <on|off|status|toggle> [word] - enable/disable/check voice password",
+  "message.voicedoor.help_setpassword": "/voicedoor setpassword <password> - set voice password to speak (default: 'kopdes jaya jaya jaya')"
 }

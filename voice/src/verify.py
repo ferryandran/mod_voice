@@ -73,8 +73,27 @@ ENROLLMENT_VERSION = 1
 # score so the gap can be measured on your own microphone and room.
 DEFAULT_VERIFY_THRESHOLD = 0.45
 
-# An enrolled member needs at least this many segments for a stable centroid.
-MIN_ENROLL_SEGMENTS = 6
+# Verification embeds each recording WHOLE instead of in preprocess.SEGMENT_SECONDS
+# chunks. The 2.5 s chunks exist for the closed-set classifier (train.py), which needs
+# many fixed-size rows; ECAPA pools over time and gets steadier with longer input.
+# Chunking also threw away leftovers under 1 s (a 3.3 s clip lost 0.8 s). Measured on
+# in-game recordings: whole-utterance scores were 0.03-0.07 higher for the same speaker.
+# Only recordings longer than this are split, to bound memory on long dataset files.
+UTTERANCE_MAX_SECONDS = 30.0
+
+# An enrolled member needs this many recordings and this much speech for a stable
+# centroid. One recording gives one embedding, so a single file says nothing about how
+# consistent the voiceprint is.
+MIN_ENROLL_FILES = 3
+MIN_ENROLL_SECONDS = 10.0
+
+
+def utterance_segments(path: str | Path, noise_reduction: bool = True) -> tuple[float, list[np.ndarray]]:
+    """Clean a recording and return (speech_seconds, [whole utterance or 30 s chunks])."""
+    cleaned, segments = preprocess_file(
+        path, noise_reduction=noise_reduction, segment_seconds=UTTERANCE_MAX_SECONDS
+    )
+    return cleaned.size / SAMPLE_RATE, segments
 
 
 class NotEnrolledError(Exception):
@@ -300,21 +319,23 @@ class EnrollmentStore:
 
         segments: list[np.ndarray] = []
         used_files = 0
+        speech_seconds = 0.0
         skipped: list[str] = []
         for file in files:
             try:
-                _, segs = preprocess_file(file, noise_reduction=noise_reduction)
+                seconds, segs = utterance_segments(file, noise_reduction=noise_reduction)
             except AudioProcessingError as exc:
                 skipped.append(f"{file.name}: {exc}")
                 continue
             segments.extend(segs)
+            speech_seconds += seconds
             used_files += 1
 
-        if len(segments) < MIN_ENROLL_SEGMENTS:
+        if used_files < MIN_ENROLL_FILES or speech_seconds < MIN_ENROLL_SECONDS:
             detail = f" Skipped: {'; '.join(skipped)}" if skipped else ""
             raise EnrollmentError(
-                f"'{match}' only yielded {len(segments)} usable segments, need at least "
-                f"{MIN_ENROLL_SEGMENTS} (about {MIN_ENROLL_SEGMENTS * 2.5:.0f} s of speech). "
+                f"'{match}' has {used_files} usable recording(s) with {speech_seconds:.1f} s of "
+                f"speech, need at least {MIN_ENROLL_FILES} recordings and {MIN_ENROLL_SECONDS:.0f} s. "
                 f"Record more samples.{detail}"
             )
 
@@ -399,7 +420,7 @@ class EnrollmentStore:
             EmbeddingUnavailableError: ECAPA encoder unavailable.
         """
         self.get(member)  # fail fast before the expensive preprocessing
-        _, segments = preprocess_file(audio_path, noise_reduction=noise_reduction)
+        _, segments = utterance_segments(audio_path, noise_reduction=noise_reduction)
         X = extract(segments)
         return self.verify_segments(X, member, threshold)
 

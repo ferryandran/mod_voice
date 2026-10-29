@@ -80,6 +80,10 @@ public final class VoiceApiClient {
             return ok && body != null && optBoolean("success", false);
         }
 
+        public boolean has(String key) {
+            return body != null && body.has(key) && !body.get(key).isJsonNull();
+        }
+
         public boolean optBoolean(String key, boolean fallback) {
             if (body == null) return fallback;
             JsonElement el = body.get(key);
@@ -235,7 +239,10 @@ public final class VoiceApiClient {
         }
         conn.setRequestMethod(method);
         conn.setConnectTimeout(VoiceDoorConfig.connectTimeoutMillis());
-        conn.setReadTimeout(VoiceDoorConfig.readTimeoutMillis());
+        int readTimeout = path.startsWith("/enroll")
+                ? Math.max(180_000, VoiceDoorConfig.readTimeoutMillis())
+                : VoiceDoorConfig.readTimeoutMillis();
+        conn.setReadTimeout(readTimeout);
         conn.setInstanceFollowRedirects(false);
         conn.setRequestProperty("Accept", "application/json");
         conn.setRequestProperty("User-Agent", "VoiceDoorMod/1.0");
