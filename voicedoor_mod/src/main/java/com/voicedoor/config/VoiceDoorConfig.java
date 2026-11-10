@@ -67,10 +67,6 @@ public final class VoiceDoorConfig {
         return SERVER.sessionGraceSeconds.get() * 20;
     }
 
-    public static int autoCloseTicks() {
-        return SERVER.autoCloseSeconds.get() * 20;
-    }
-
     public static int cooldownTicks() {
         return SERVER.cooldownSeconds.get() * 20;
     }
@@ -121,15 +117,6 @@ public final class VoiceDoorConfig {
         SERVER.threshold.save();
     }
 
-    public static int autoCloseSeconds() {
-        return SERVER.autoCloseSeconds.get();
-    }
-
-    public static void setAutoCloseSeconds(int seconds) {
-        SERVER.autoCloseSeconds.set(Math.max(0, Math.min(seconds, 120)));
-        SERVER.autoCloseSeconds.save();
-    }
-
     public static void setDoorPassword(String password) {
         SERVER.doorPassword.set(password == null ? "" : password.trim());
         SERVER.doorPassword.save();
@@ -152,7 +139,6 @@ public final class VoiceDoorConfig {
         private final ForgeConfigSpec.DoubleValue threshold;
         private final ForgeConfigSpec.IntValue recordingSeconds;
         private final ForgeConfigSpec.IntValue sessionGraceSeconds;
-        private final ForgeConfigSpec.IntValue autoCloseSeconds;
         private final ForgeConfigSpec.IntValue cooldownSeconds;
         private final ForgeConfigSpec.BooleanValue requireChallenge;
         private final ForgeConfigSpec.IntValue connectTimeoutSeconds;
@@ -226,10 +212,6 @@ public final class VoiceDoorConfig {
 
             builder.pop();
             builder.comment("Perilaku pintu").push("door");
-
-            autoCloseSeconds = builder
-                    .comment("Berapa lama pintu tetap terbuka setelah verifikasi berhasil (detik)")
-                    .defineInRange("autoCloseSeconds", 5, 1, 120);
 
             cooldownSeconds = builder
                     .comment("Jeda minimum antar percobaan verifikasi per pemain (detik)")

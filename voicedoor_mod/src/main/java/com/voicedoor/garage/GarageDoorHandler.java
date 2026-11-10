@@ -64,20 +64,28 @@ public class GarageDoorHandler {
 
         // Jika pintu sedang terbuka, klik kanan akan menutup pintu langsung
         if (GarageDoorHelper.isOpen(level, clickedTop) || GarageDoorHelper.isOpen(level, topPos)) {
+            // Menutup tidak butuh verifikasi; setelah tertutup pintu terkunci lagi.
             Set<BlockPos> linked = GarageDoorHelper.setDoorOpen(serverLevel, topPos, false);
             for (BlockPos pos : linked) {
                 GarageDoorData.Entry linkedEntry = data.getEntry(pos);
-                if (linkedEntry != null) linkedEntry.openTicks = 0;
+                if (linkedEntry != null) linkedEntry.unlocked = false;
             }
-            entry.openTicks = 0;
+            entry.unlocked = false;
             data.setDirty();
             player.sendSystemMessage(Component.translatable("message.voicedoor.door_closed"));
             return;
         }
 
-        // Buka GUI Screen interaktif di layar pemain
-        ModNetwork.sendTo(player, new com.voicedoor.network.S2COpenVoiceScreenPacket(
-                topPos, true, entry.getVoiceQueryString(), ""));
+        if (!entry.hasOwner()) {
+            return;
+        }
+        if (ModNetwork.hasModInstalled(player)) {
+            ModNetwork.sendTo(player, new com.voicedoor.network.S2COpenVoiceScreenPacket(
+                    topPos, true, entry.getVoiceQueryString(), ""));
+        } else {
+            // Client tanpa mod tidak bisa membuka GUI: rekam berdurasi tetap lewat chat.
+            handleVerification(player, serverLevel, topPos, entry, false);
+        }
     }
 
     public static void startSessionFromGui(ServerPlayer player, BlockPos topPos) {
@@ -121,7 +129,7 @@ public class GarageDoorHandler {
         String member = entry.getVoiceQueryString();
         boolean queued = VoiceApiClient.tryPostJsonAsync(
                 "/challenge",
-                "{\"member\":\"" + escapeJson(member) + "\"}",
+                VoiceApiClient.jsonObject("member", member),
                 response -> level.getServer().execute(() -> {
                     if (!player.isAlive() || player.hasDisconnected()) return;
 
@@ -222,10 +230,10 @@ public class GarageDoorHandler {
                 for (BlockPos pos : GarageDoorHelper.setDoorOpen(level, topPos, true)) {
                     GarageDoorData.Entry linkedEntry = data.getEntry(pos);
                     if (linkedEntry != null && linkedEntry.hasOwner()) {
-                        linkedEntry.openTicks = VoiceDoorConfig.autoCloseTicks();
+                        linkedEntry.unlocked = true;
                     }
                 }
-                entry.openTicks = VoiceDoorConfig.autoCloseTicks();
+                entry.unlocked = true;
                 data.setDirty();
             } else {
                 String reason = response.isSuccess()
@@ -255,18 +263,18 @@ public class GarageDoorHandler {
         boolean dirty = false;
 
         for (GarageDoorData.Entry entry : data.getAllDoors().values()) {
-            if (entry.openTicks > 0) {
-                entry.openTicks--;
-                if (entry.openTicks == 0) {
+            if (entry.hasOwner() && serverLevel.isLoaded(entry.pos)
+                    && GarageDoorHelper.isGarageDoor(serverLevel.getBlockState(entry.pos).getBlock())) {
+                boolean open = GarageDoorHelper.isOpen(serverLevel, entry.pos);
+                if (open && !entry.unlocked) {
+                    // Pintu terkunci terbuka tanpa verifikasi suara (misal redstone, yang lewat
+                    // toggleDoor Macaw's ikut membuka kolom ini) -> tutup lagi seluruh rangkaian
                     GarageDoorHelper.setDoorOpen(serverLevel, entry.pos, false);
+                } else if (!open && entry.unlocked) {
+                    // Ditutup lewat jalur lain: kunci lagi.
+                    entry.unlocked = false;
                     dirty = true;
                 }
-            } else if (entry.hasOwner() && serverLevel.isLoaded(entry.pos)
-                    && GarageDoorHelper.isGarageDoor(serverLevel.getBlockState(entry.pos).getBlock())
-                    && GarageDoorHelper.isOpen(serverLevel, entry.pos)) {
-                // Pintu terkunci terbuka tanpa verifikasi suara (misal redstone, yang lewat
-                // toggleDoor Macaw's ikut membuka kolom ini) -> tutup lagi seluruh rangkaian
-                GarageDoorHelper.setDoorOpen(serverLevel, entry.pos, false);
             }
 
             if (!entry.cooldowns.isEmpty()) {
@@ -281,9 +289,5 @@ public class GarageDoorHandler {
         if (dirty) {
             data.setDirty();
         }
-    }
-
-    private static String escapeJson(String raw) {
-        return raw.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 }

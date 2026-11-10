@@ -38,6 +38,7 @@ import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.block.state.properties.EnumProperty;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.shapes.CollisionContext;
+import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
 import javax.annotation.Nullable;
@@ -65,11 +66,9 @@ public class VoiceDoorBlock extends BaseEntityBlock {
     public static final EnumProperty<DoorHingeSide> HINGE = BlockStateProperties.DOOR_HINGE;
     public static final EnumProperty<DoubleBlockHalf> HALF = BlockStateProperties.DOUBLE_BLOCK_HALF;
 
-    // Bentuk collision - sama seperti pintu vanilla (tebal 3/16 blok).
-    protected static final VoxelShape SOUTH_AABB = Block.box(0.0D, 0.0D, 0.0D, 16.0D, 16.0D, 3.0D);
-    protected static final VoxelShape NORTH_AABB = Block.box(0.0D, 0.0D, 13.0D, 16.0D, 16.0D, 16.0D);
-    protected static final VoxelShape WEST_AABB = Block.box(13.0D, 0.0D, 0.0D, 16.0D, 16.0D, 16.0D);
-    protected static final VoxelShape EAST_AABB = Block.box(0.0D, 0.0D, 0.0D, 3.0D, 16.0D, 16.0D);
+    // Bentuk mengikuti model garasi Macaw's: panel tebal 4/16 di tengah blok.
+    protected static final VoxelShape PANEL_X = Block.box(0.0D, 0.0D, 6.0D, 16.0D, 16.0D, 10.0D);
+    protected static final VoxelShape PANEL_Z = Block.box(6.0D, 0.0D, 0.0D, 10.0D, 16.0D, 16.0D);
 
     public VoiceDoorBlock(Properties properties) {
         super(properties);
@@ -191,24 +190,16 @@ public class VoiceDoorBlock extends BaseEntityBlock {
     // -----------------------------------------------------------------------
     @Override
     public VoxelShape getShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext context) {
-        Direction facing = state.getValue(FACING);
-        boolean open = state.getValue(OPEN);
-        boolean rightHinge = state.getValue(HINGE) == DoorHingeSide.RIGHT;
+        // Outline tetap ada walau terbuka, supaya pemain bisa mengklik pintu untuk menutupnya.
+        Direction.Axis axis = state.getValue(FACING).getAxis();
+        return axis == Direction.Axis.Z ? PANEL_X : PANEL_Z;
+    }
 
-        if (!open) {
-            return switch (facing) {
-                case EAST -> EAST_AABB;
-                case SOUTH -> SOUTH_AABB;
-                case WEST -> WEST_AABB;
-                default -> NORTH_AABB;
-            };
-        }
-        return switch (facing) {
-            case EAST -> rightHinge ? SOUTH_AABB : NORTH_AABB;
-            case SOUTH -> rightHinge ? WEST_AABB : EAST_AABB;
-            case WEST -> rightHinge ? NORTH_AABB : SOUTH_AABB;
-            default -> rightHinge ? EAST_AABB : WEST_AABB;
-        };
+    @Override
+    public VoxelShape getCollisionShape(BlockState state, BlockGetter level, BlockPos pos,
+                                        CollisionContext context) {
+        // Pintu garasi terbuka tergulung ke atas: tidak menghalangi jalan.
+        return state.getValue(OPEN) ? Shapes.empty() : getShape(state, level, pos, context);
     }
 
     // -----------------------------------------------------------------------

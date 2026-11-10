@@ -42,8 +42,6 @@ public interface DoorTarget {
 
     boolean isOpen();
 
-    int getRemainingOpenTicks();
-
     String getApiUrl();
 
     boolean hasApiUrlOverride();
@@ -156,11 +154,6 @@ public interface DoorTarget {
         }
 
         @Override
-        public int getRemainingOpenTicks() {
-            return be.getRemainingOpenTicks();
-        }
-
-        @Override
         public String getApiUrl() {
             return be.getApiUrl();
         }
@@ -256,12 +249,6 @@ public interface DoorTarget {
         @Override
         public boolean isOpen() {
             return GarageDoorHelper.isOpen(level, topPos);
-        }
-
-        @Override
-        public int getRemainingOpenTicks() {
-            GarageDoorData.Entry e = entry();
-            return e != null ? e.openTicks : 0;
         }
 
         @Override

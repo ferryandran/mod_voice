@@ -31,7 +31,7 @@
   "message.voicedoor.too_little_audio": "Suara yang terekam terlalu sedikit. Bicaralah sedikit lebih lama.",
   "message.voicedoor.challenge_failed": "Tidak bisa memulai verifikasi: %s",
 
-  "message.voicedoor.accepted": "Suara dikenali sebagai §e%s§r (kecocokan %s%%). Pintu terbuka!",
+  "message.voicedoor.accepted": "Suara dikenali sebagai §e%s§r (kecocokan %s%%). Pintu terbuka! Klik lagi untuk menutup.",
   "message.voicedoor.rejected": "Akses ditolak. %s",
   "message.voicedoor.reason_low_score": "Kecocokan hanya %s%%, di bawah batas %s%%.",
 
@@ -56,7 +56,7 @@
   "message.voicedoor.info_state": "Status: %s",
   "message.voicedoor.info_voices": "Suara berizin: %s",
   "message.voicedoor.info_allowed": "Pemain berizin: %s",
-  "message.voicedoor.state_open": "terbuka (%s dtk lagi)",
+  "message.voicedoor.state_open": "terbuka (klik untuk menutup & mengunci)",
   "message.voicedoor.state_closed": "tertutup",
 
   "message.voicedoor.status_checking": "Menghubungi server suara...",

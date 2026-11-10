@@ -284,8 +284,7 @@ public final class VoiceDoorCommands {
                 String.format(java.util.Locale.ROOT, "%.2f", VoiceDoorConfig.threshold()));
         line(player, "message.voicedoor.info_state",
                 door.isOpen()
-                        ? Component.translatable("message.voicedoor.state_open",
-                                door.getRemainingOpenTicks() / 20).getString()
+                        ? Component.translatable("message.voicedoor.state_open").getString()
                         : Component.translatable("message.voicedoor.state_closed").getString());
 
         java.util.Collection<String> voiceList = door.getVoiceMembers();
@@ -509,7 +508,7 @@ public final class VoiceDoorCommands {
                 .withStyle(ChatFormatting.AQUA), false);
 
         boolean queued = VoiceApiClient.tryPostJsonAsync("/enroll",
-                "{\"member\":\"" + member.replace("\"", "\\\"") + "\"}",
+                VoiceApiClient.jsonObject("member", member),
                 response -> {
                     Component message = response.isSuccess()
                             ? Component.translatable("message.voicedoor.enroll_done",
@@ -601,19 +600,20 @@ public final class VoiceDoorCommands {
         // Simpan ke config lokal
         VoiceDoorConfig.setDoorPassword(trimmed);
 
+        // broadcastToAdmins=false: password tidak boleh ikut tersiar ke OP lain dan log server.
         if (trimmed.isEmpty()) {
             source.sendSuccess(() -> Component.literal(
                     "[VoiceDoor] Password dinonaktifkan (OFF). Pintu sekarang hanya memverifikasi suara.")
-                    .withStyle(ChatFormatting.YELLOW), true);
+                    .withStyle(ChatFormatting.YELLOW), false);
         } else {
             source.sendSuccess(() -> Component.literal(
                     "[VoiceDoor] Password diaktifkan (ON): \"" + trimmed + "\"")
-                    .withStyle(ChatFormatting.GREEN), true);
+                    .withStyle(ChatFormatting.GREEN), false);
         }
 
         // Kirim juga ke server Python API
         boolean queued = VoiceApiClient.tryPostJsonAsync("/password",
-                "{\"password\":\"" + trimmed.replace("\"", "\\\"") + "\"}",
+                VoiceApiClient.jsonObject("password", trimmed),
                 response -> {
                     Component message = response.isSuccess()
                             ? Component.literal("[VoiceDoor] Password tersinkronisasi ke API server.")

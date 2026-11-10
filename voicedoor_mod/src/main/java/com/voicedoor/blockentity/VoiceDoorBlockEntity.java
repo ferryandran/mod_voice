@@ -39,16 +39,17 @@ import java.util.UUID;
  *   <li>Server meminta challenge sekali-pakai dari Python API ({@code POST /challenge}).</li>
  *   <li>Sesi rekaman dimulai lewat Simple Voice Chat, terikat ke pintu ini dan challenge itu.</li>
  *   <li>Setelah audio terkumpul, dikirim ke {@code POST /verify} bersama challenge-nya.</li>
- *   <li>Kalau diterima, pintu terbuka selama {@code autoCloseSeconds}.</li>
+ *   <li>Kalau diterima, pintu terbuka sampai diklik lagi untuk ditutup.</li>
  * </ol>
  *
  * <p>Challenge di langkah 2 yang mencegah rekaman suara pemilik dipakai ulang: audio tanpa
  * challenge yang valid dan belum terpakai akan ditolak server.
  *
- * <p>Yang disimpan ke NBT: pemilik, daftar pemain berizin, override URL API, dan
- * <b>sisa waktu pintu terbuka</b>. Yang terakhir dulunya hanya ada di memori, sehingga
- * pintu yang terbuka lalu chunk-nya di-unload akan tetap terbuka selamanya - auto-close
- * tidak pernah berjalan lagi setelah chunk dimuat ulang.
+ * <p>Setelah terbuka, pintu tetap terbuka sampai seseorang mengkliknya lagi. Menutup
+ * tidak butuh verifikasi apa pun; begitu tertutup, pintu terkunci lagi dan membukanya
+ * butuh verifikasi suara baru. Status buka/tutup disimpan di blockstate {@code OPEN}.
+ *
+ * <p>Yang disimpan ke NBT: pemilik, daftar pemain berizin, dan override URL API.
  */
 public class VoiceDoorBlockEntity extends BlockEntity {
 
@@ -58,7 +59,6 @@ public class VoiceDoorBlockEntity extends BlockEntity {
     private final Set<UUID> authorizedPlayers = new HashSet<>();
     /** Override URL API khusus pintu ini. Kosong berarti memakai config server. */
     private String apiUrlOverride = "";
-    private int openTicks = 0;
 
     // State runtime
     private final Map<UUID, Integer> verificationCooldowns = new HashMap<>();
@@ -72,14 +72,6 @@ public class VoiceDoorBlockEntity extends BlockEntity {
     // -----------------------------------------------------------------------
     public static void tick(Level level, BlockPos pos, BlockState state, VoiceDoorBlockEntity be) {
         if (level.isClientSide) return;
-
-        if (be.openTicks > 0) {
-            be.openTicks--;
-            if (be.openTicks == 0) {
-                be.closeDoor(level, pos);
-                be.setChanged();
-            }
-        }
 
         // Map cooldown biasanya kosong; lewati supaya tidak mengalokasikan iterator
         // 20x per detik per pintu tanpa ada yang dikerjakan.
@@ -96,15 +88,24 @@ public class VoiceDoorBlockEntity extends BlockEntity {
     // Interaksi pemain
     // -----------------------------------------------------------------------
     public void handlePlayerInteraction(ServerPlayer player, BlockPos pos, Level level) {
-        UUID playerUUID = player.getUUID();
+        // Pintu terbuka: klik = tutup, tanpa verifikasi. Setelah tertutup pintu terkunci lagi.
+        if (isOpen()) {
+            closeDoor(level, pos);
+            player.sendSystemMessage(Component.translatable("message.voicedoor.door_closed"));
+            return;
+        }
 
         if (ownerUUID == null || ownerName.isEmpty()) {
             player.sendSystemMessage(Component.translatable("message.voicedoor.no_owner"));
             return;
         }
 
-        // Buka GUI Screen untuk pemain
-        ModNetwork.sendTo(player, new com.voicedoor.network.S2COpenVoiceScreenPacket(pos, false, ownerName, ""));
+        if (ModNetwork.hasModInstalled(player)) {
+            ModNetwork.sendTo(player, new com.voicedoor.network.S2COpenVoiceScreenPacket(pos, false, ownerName, ""));
+        } else {
+            // Client tanpa mod tidak bisa membuka GUI: langsung rekam berdurasi tetap lewat chat.
+            startVerificationSession(player, pos, level, false);
+        }
     }
 
     public static void startSessionFromGui(ServerPlayer player, BlockPos pos) {
@@ -220,7 +221,7 @@ public class VoiceDoorBlockEntity extends BlockEntity {
         String member = ownerName;
         boolean queued = VoiceApiClient.tryPostJsonAsync(
                 "/challenge",
-                "{\"member\":\"" + escapeJson(member) + "\"}",
+                VoiceApiClient.jsonObject("member", member),
                 response -> runOnServer(level, () -> {
                     if (!player.isAlive() || player.hasDisconnected()) return;
 
@@ -436,8 +437,6 @@ public class VoiceDoorBlockEntity extends BlockEntity {
         BlockState state = level.getBlockState(pos);
         if (state.getBlock() instanceof VoiceDoorBlock door) {
             door.setOpen(null, level, state, pos, true);
-            openTicks = VoiceDoorConfig.autoCloseTicks();
-            setChanged();
         }
     }
 
@@ -518,11 +517,8 @@ public class VoiceDoorBlockEntity extends BlockEntity {
     }
 
     public boolean isOpen() {
-        return openTicks > 0;
-    }
-
-    public int getRemainingOpenTicks() {
-        return openTicks;
+        BlockState state = getBlockState();
+        return state.hasProperty(VoiceDoorBlock.OPEN) && state.getValue(VoiceDoorBlock.OPEN);
     }
 
     // -----------------------------------------------------------------------
@@ -536,8 +532,6 @@ public class VoiceDoorBlockEntity extends BlockEntity {
         }
         tag.putString("OwnerName", ownerName);
         tag.putString("ApiUrlOverride", apiUrlOverride);
-        // Disimpan supaya auto-close tetap berjalan setelah chunk dimuat ulang.
-        tag.putInt("OpenTicks", openTicks);
 
         ListTag list = new ListTag();
         for (UUID uuid : authorizedPlayers) {
@@ -554,7 +548,6 @@ public class VoiceDoorBlockEntity extends BlockEntity {
         ownerUUID = tag.hasUUID("OwnerUUID") ? tag.getUUID("OwnerUUID") : null;
         ownerName = tag.getString("OwnerName");
         apiUrlOverride = tag.getString("ApiUrlOverride");
-        openTicks = tag.getInt("OpenTicks");
 
         authorizedPlayers.clear();
         if (tag.contains("Authorized", Tag.TAG_LIST)) {
@@ -615,29 +608,6 @@ public class VoiceDoorBlockEntity extends BlockEntity {
     // -----------------------------------------------------------------------
     // Util
     // -----------------------------------------------------------------------
-    /** Escape minimal untuk menyisipkan nama ke dalam body JSON kecil. */
-    private static String escapeJson(String raw) {
-        StringBuilder out = new StringBuilder(raw.length() + 8);
-        for (int i = 0; i < raw.length(); i++) {
-            char c = raw.charAt(i);
-            switch (c) {
-                case '"' -> out.append("\\\"");
-                case '\\' -> out.append("\\\\");
-                case '\n' -> out.append("\\n");
-                case '\r' -> out.append("\\r");
-                case '\t' -> out.append("\\t");
-                default -> {
-                    if (c < 0x20) {
-                        out.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        out.append(c);
-                    }
-                }
-            }
-        }
-        return out.toString();
-    }
-
     /** Daftar pemain berizin sebagai list agar mudah ditampilkan command. */
     public List<UUID> authorizedList() {
         return new ArrayList<>(authorizedPlayers);

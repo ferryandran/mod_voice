@@ -53,17 +53,30 @@ public final class VoiceApiClient {
      * Pool terbatas dengan queue pendek. Kalau penuh, request ditolak seketika supaya
      * pemain dapat pesan "server sibuk" alih-alih menunggu tanpa batas.
      */
-    private static final ExecutorService EXECUTOR = new ThreadPoolExecutor(
-            1, Math.max(1, VoiceDoorConfig.maxConcurrentRequests()),
-            30L, TimeUnit.SECONDS,
-            new LinkedBlockingQueue<>(16),
-            r -> {
-                Thread t = new Thread(r, "VoiceDoor-HTTP");
-                t.setDaemon(true);
-                return t;
-            },
-            new ThreadPoolExecutor.AbortPolicy()
-    );
+    private static final ExecutorService EXECUTOR = createExecutor();
+
+    /**
+     * Core size = max size. Dengan queue terbatas, ThreadPoolExecutor baru menambah thread
+     * di atas core setelah queue PENUH - jadi core 1 / max N sebenarnya berjalan satu
+     * thread, dan /verify beberapa pemain mengantre satu per satu. Thread menganggur tetap
+     * dimatikan lewat allowCoreThreadTimeOut.
+     */
+    private static ExecutorService createExecutor() {
+        int threads = Math.max(1, VoiceDoorConfig.maxConcurrentRequests());
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                threads, threads,
+                30L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(16),
+                r -> {
+                    Thread t = new Thread(r, "VoiceDoor-HTTP");
+                    t.setDaemon(true);
+                    return t;
+                },
+                new ThreadPoolExecutor.AbortPolicy()
+        );
+        executor.allowCoreThreadTimeOut(true);
+        return executor;
+    }
 
     private VoiceApiClient() {
     }
@@ -140,6 +153,13 @@ public final class VoiceApiClient {
     // -----------------------------------------------------------------------
     // Semua varian mengembalikan false kalau antrean penuh, supaya pemanggil bisa memberi
     // tahu pemain alih-alih menunggu balasan yang tidak akan pernah datang.
+
+    /** Body JSON {@code {"key": value}} dengan escape yang benar (lewat Gson). */
+    public static String jsonObject(String key, String value) {
+        JsonObject obj = new JsonObject();
+        obj.addProperty(key, value == null ? "" : value);
+        return obj.toString();
+    }
 
     public static boolean tryPostFormAsync(String path, MultipartBody body, ResponseHandler handler) {
         return submit(() -> handler.accept(postForm(path, body)));

@@ -27,7 +27,7 @@ Pemain klik pintu
       ├─► Python: ECAPA-TDNN ubah audio jadi voiceprint 192 dimensi,
       │           bandingkan dengan voiceprint pemilik (cosine similarity)
       │
-      └─► Cocok di atas ambang → pintu terbuka 5 detik, lalu menutup sendiri
+      └─► Cocok di atas ambang → pintu terbuka sampai diklik lagi (menutup tanpa verifikasi, lalu terkunci)
 ```
 
 Sistemnya memakai **speaker verification** (1-vs-rest), bukan klasifikasi antar anggota. Praktisnya: satu orang saja sudah cukup, tidak perlu melatih model, dan menambah orang baru tidak mengganggu yang sudah ada.
@@ -71,7 +71,7 @@ Detail lengkap, opsi CLI, dan troubleshooting ada di [voice/README.md](voice/REA
 
 ### 2. Mod Minecraft
 
-Butuh **Forge 1.20.1 (47.3.0+)** dan **[Simple Voice Chat](https://modrinth.com/plugin/simple-voice-chat) 2.5.0+**.
+Butuh **Forge 1.20.1 (47.3.0+)**, **[Simple Voice Chat](https://modrinth.com/plugin/simple-voice-chat) 2.5.0+**, dan **[Macaw's Doors](https://www.curseforge.com/minecraft/mc-mods/macaws-doors)** (model pintunya dipakai blok VoiceDoor).
 
 ```bash
 cd voicedoor_mod

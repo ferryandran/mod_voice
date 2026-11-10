@@ -1,5 +1,6 @@
 package com.voicedoor;
 
+import com.voicedoor.api.VoiceApiClient;
 import com.voicedoor.block.ModBlocks;
 import com.voicedoor.blockentity.ModBlockEntities;
 import com.voicedoor.command.VoiceDoorCommands;
@@ -82,6 +83,30 @@ public class VoiceDoorMod {
             LOGGER.warn("[VoiceDoor] Token API belum diatur. Jalankan '/voicedoor settoken <token>' "
                     + "dengan token yang dicetak voice_api_server.py, atau jalankan server API "
                     + "dengan --no-auth untuk pengujian lokal.");
+        }
+        syncPasswordToApi();
+    }
+
+    /**
+     * Config mod adalah sumber kebenaran password. Kirim ke API setiap server start supaya
+     * keduanya tidak pernah berbeda (misal API sempat di-restart dengan password default).
+     */
+    private static void syncPasswordToApi() {
+        String password = VoiceDoorConfig.doorPassword();
+        boolean queued = VoiceApiClient.tryPostJsonAsync("/password",
+                VoiceApiClient.jsonObject("password", password),
+                response -> {
+                    if (response.isSuccess()) {
+                        LOGGER.info("[VoiceDoor] Password tersinkronisasi ke API server ({}).",
+                                password.isEmpty() ? "nonaktif" : "aktif");
+                    } else {
+                        LOGGER.warn("[VoiceDoor] Gagal sinkronisasi password ke API server: {}. "
+                                + "Jalankan '/voicedoor password status' lalu set ulang setelah API hidup.",
+                                response.errorMessage());
+                    }
+                });
+        if (!queued) {
+            LOGGER.warn("[VoiceDoor] Antrean HTTP penuh, sinkronisasi password dilewati.");
         }
     }
 

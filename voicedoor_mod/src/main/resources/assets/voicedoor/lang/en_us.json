@@ -31,7 +31,7 @@
   "message.voicedoor.too_little_audio": "Not enough speech was captured. Speak a little longer.",
   "message.voicedoor.challenge_failed": "Could not start verification: %s",
 
-  "message.voicedoor.accepted": "Voice recognized as §e%s§r (%s%% match). Door open!",
+  "message.voicedoor.accepted": "Voice recognized as §e%s§r (%s%% match). Door open! Click it again to close.",
   "message.voicedoor.rejected": "Access denied. %s",
   "message.voicedoor.reason_low_score": "Match was only %s%%, below the required %s%%.",
 
@@ -56,7 +56,7 @@
   "message.voicedoor.info_state": "State: %s",
   "message.voicedoor.info_voices": "Allowed voices: %s",
   "message.voicedoor.info_allowed": "Allowed players: %s",
-  "message.voicedoor.state_open": "open (%s s left)",
+  "message.voicedoor.state_open": "open (click to close and lock)",
   "message.voicedoor.state_closed": "closed",
 
   "message.voicedoor.status_checking": "Contacting the voice server...",

@@ -31,6 +31,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "_verify_threshold", 0.45)
     monkeypatch.setattr(api, "_require_challenge", True)
     monkeypatch.setattr(api, "_door_password", "")
+    monkeypatch.setattr(api, "PASSWORD_FILE", tmp_path / "door_settings.json")
 
     centroid = np.zeros(ECAPA_DIM, dtype=np.float32)
     centroid[0] = 1.0
@@ -315,17 +316,29 @@ def test_password_endpoint_get_and_set(client):
     # GET initial
     resp = client.get("/password", headers=auth())
     assert resp.status_code == 200
-    assert resp.get_json()["password"] == ""
+    assert resp.get_json()["has_password"] is False
 
-    # POST set new password
+    # POST set new password - the value is never echoed back
     resp = client.post("/password", headers=auth(), json={"password": "kopdes jaya jaya jaya"})
     assert resp.status_code == 200
-    assert resp.get_json()["password"] == "kopdes jaya jaya jaya"
+    assert "password" not in resp.get_json()
+    assert resp.get_json()["has_password"] is True
 
-    # GET again to verify
+    # GET again: only status, never the secret itself
     resp = client.get("/password", headers=auth())
     assert resp.status_code == 200
-    assert resp.get_json()["password"] == "kopdes jaya jaya jaya"
+    body = resp.get_json()
+    assert body["has_password"] is True
+    assert body["password_length"] == len("kopdes jaya jaya jaya")
+    assert "kopdes" not in resp.get_data(as_text=True)
+
+
+def test_password_survives_restart(client):
+    """A restart must not silently bring back the default password."""
+    client.post("/password", headers=auth(), json={"password": ""})
+    assert api.load_password() == ""
+    client.post("/password", headers=auth(), json={"password": "buka pintu"})
+    assert api.load_password() == "buka pintu"
 
 
 def test_verify_requires_password_when_configured(client, monkeypatch):
@@ -360,3 +373,6 @@ def test_verify_rejects_when_password_does_not_match(client, monkeypatch):
     assert body["password_ok"] is False
     assert body["voice_ok"] is True  # voice itself matched, but password didn't
     assert "Password tidak cocok" in body["error"]
+    # The correct password must never leak to a caller who got it wrong.
+    assert "kopdes" not in resp.get_data(as_text=True)
+    assert "expected_password" not in body

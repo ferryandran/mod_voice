@@ -67,7 +67,10 @@ public class GarageDoorData extends SavedData {
                     entry.addVoice(part.trim());
                 }
             }
-            entry.openTicks = entryTag.getInt("OpenTicks");
+            // Format lama menyimpan sisa waktu auto-close; > 0 berarti sedang terbuka sah.
+            entry.unlocked = entryTag.contains("Unlocked")
+                    ? entryTag.getBoolean("Unlocked")
+                    : entryTag.getInt("OpenTicks") > 0;
             data.doors.put(pos, entry);
         }
         return data;
@@ -98,7 +101,7 @@ public class GarageDoorData extends SavedData {
             }
             entryTag.put("VoiceMembers", voiceList);
 
-            entryTag.putInt("OpenTicks", entry.openTicks);
+            entryTag.putBoolean("Unlocked", entry.unlocked);
 
             list.add(entryTag);
         }
@@ -146,7 +149,11 @@ public class GarageDoorData extends SavedData {
         public String ownerName;
         public final Set<UUID> authorizedPlayers;
         public final Set<String> voiceMembers = new java.util.LinkedHashSet<>();
-        public int openTicks = 0;
+        /**
+         * True setelah verifikasi suara berhasil membuka pintu, sampai pintu ditutup lagi.
+         * Pintu terkunci yang terbuka tanpa flag ini (misal lewat redstone) ditutup paksa.
+         */
+        public boolean unlocked = false;
         public final Map<UUID, Integer> cooldowns = new HashMap<>();
 
         public Entry(BlockPos pos, UUID ownerUUID, String ownerName, Set<UUID> authorized) {

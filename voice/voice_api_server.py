@@ -19,8 +19,8 @@ Endpoint (semua kecuali /health butuh header X-VoiceDoor-Token):
   POST /register        - simpan sample suara, lalu perbarui voiceprint
   POST /enroll          - hitung ulang voiceprint dari sample yang ada
   POST /train           - latih classifier closed-set (hanya untuk UI Streamlit)
-  GET  /password        - lihat password saat ini (masked)
-  POST /password        - ubah password untuk verifikasi
+  GET  /password        - status password (aktif/tidak, panjang) - isinya tidak dikirim
+  POST /password        - ubah password untuk verifikasi (disimpan ke models/door_settings.json)
 
 Cara menjalankan:
     python voice_api_server.py                      # 127.0.0.1:5000, token dibuat otomatis
@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import io
+import json
 import logging
 import os
 import re
@@ -135,6 +136,9 @@ _require_challenge = True
 # Kosong berarti tanpa password. Default: "kopdes jaya jaya jaya".
 DEFAULT_PASSWORD = "kopdes jaya jaya jaya"
 PASSWORD_MATCH_RATIO = 0.6  # minimal 60% kata harus cocok
+# Disimpan ke disk supaya restart server tidak diam-diam mengembalikan password ke default
+# (mod mengira password OFF, server tetap memintanya). models/ sudah di-gitignore.
+PASSWORD_FILE = MODELS_DIR / "door_settings.json"
 _door_password: str = DEFAULT_PASSWORD
 _password_lock = Lock()
 
@@ -193,6 +197,33 @@ def require_token(view):
         return view(*args, **kwargs)
 
     return wrapper
+
+
+def load_password() -> str | None:
+    """Password tersimpan, atau None kalau belum pernah diset lewat /password."""
+    try:
+        data = json.loads(PASSWORD_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get("password") if isinstance(data, dict) else None
+    return value.strip() if isinstance(value, str) else None
+
+
+def save_password(password: str) -> None:
+    """Simpan password secara atomik (tulis file sementara lalu rename)."""
+    PASSWORD_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PASSWORD_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"password": password}), encoding="utf-8")
+    os.replace(tmp, PASSWORD_FILE)
+    try:
+        os.chmod(PASSWORD_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def password_info(password: str) -> dict:
+    """Status password untuk respons API - isinya sengaja tidak pernah dikirim balik."""
+    return {"has_password": bool(password), "password_length": len(password)}
 
 
 def rate_limited(member: str) -> bool:
@@ -400,14 +431,11 @@ def status():
 @app.route("/password", methods=["GET"])
 @require_token
 def get_password():
-    """Lihat password saat ini."""
+    """Status password. Isinya tidak dikirim: respons API mudah ikut tercatat di log,
+    dan pemegang token tidak perlu tahu kata sandinya."""
     with _password_lock:
         current = _door_password
-    return jsonify({
-        "success": True,
-        "password": current,
-        "has_password": bool(current),
-    })
+    return jsonify({"success": True, **password_info(current)})
 
 
 @app.route("/password", methods=["POST"])
@@ -419,14 +447,24 @@ def set_password():
              Kirim password kosong untuk menonaktifkan.
     """
     body = request.get_json(silent=True) or {}
-    new_password = (request.form.get("password") or body.get("password", "")).strip()
+    raw = request.form.get("password")
+    if raw is None:
+        raw = body.get("password", "")
+    if not isinstance(raw, str):
+        return error("Parameter 'password' harus berupa teks.")
+    new_password = raw.strip()
+    global _door_password
     with _password_lock:
-        global _door_password
+        try:
+            save_password(new_password)
+        except OSError as exc:
+            logger.exception("Gagal menyimpan password")
+            return error(f"Gagal menyimpan password: {exc}", 500)
         _door_password = new_password
-    logger.info("Password diubah menjadi: %s", repr(new_password) if new_password else "(dinonaktifkan)")
+    logger.info("Password %s.", "diperbarui" if new_password else "dinonaktifkan")
     return jsonify({
         "success": True,
-        "password": new_password,
+        **password_info(new_password),
         "message": "Password diperbarui." if new_password else "Password dinonaktifkan.",
     })
 
@@ -613,7 +651,6 @@ def verify():
         if transcript is None or not transcript.strip():
             logger.warning("Password diset tapi transkripsi tidak tersedia - tolak demi aman.")
             payload["password_ok"] = False
-            payload["expected_password"] = current_password
             if not payload.get("error"):
                 payload["error"] = ("Password tidak bisa diverifikasi (transkripsi tidak tersedia). "
                                     "Pastikan server punya koneksi internet.")
@@ -622,10 +659,9 @@ def verify():
             ok, ratio = _password_matches(current_password, transcript)
             payload["password_ok"] = ok
             payload["password_ratio"] = round(ratio, 3)
-            payload["expected_password"] = current_password
             if not ok:
                 if not payload.get("error"):
-                    payload["error"] = f"Password tidak cocok. Password yang benar: '{current_password}'."
+                    payload["error"] = "Password tidak cocok."
                 accepted = False
     else:
         payload["password_ok"] = True  # tidak ada password = selalu lolos
@@ -881,8 +917,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help=f"Ambang cosine similarity (default {DEFAULT_VERIFY_THRESHOLD})")
     p.add_argument("--require-passphrase", action="store_true",
                    help="Wajibkan pemain mengucapkan frasa acak (anti-replay kuat, butuh internet)")
-    p.add_argument("--password", default=DEFAULT_PASSWORD,
-                   help=f"Password yang harus diucapkan (default: '{DEFAULT_PASSWORD}'). "
+    p.add_argument("--password", default=None,
+                   help=f"Password yang harus diucapkan. Tanpa opsi ini dipakai password "
+                        f"tersimpan terakhir, atau '{DEFAULT_PASSWORD}' kalau belum pernah diset. "
                         f"Kosongkan dengan --password '' untuk menonaktifkan.")
     p.add_argument("--language", default="id-ID",
                    help="Bahasa transkripsi frasa, misal id-ID atau en-US")
@@ -904,7 +941,12 @@ def main(argv: list[str] | None = None) -> int:
     _verify_threshold = float(min(max(args.threshold, MIN_ALLOWED_THRESHOLD), MAX_ALLOWED_THRESHOLD))
     _require_challenge = not args.no_challenge
     _transcribe_language = args.language
-    _door_password = args.password.strip() if args.password else ""
+    if args.password is not None:
+        _door_password = args.password.strip()
+        save_password(_door_password)
+    else:
+        stored = load_password()
+        _door_password = DEFAULT_PASSWORD if stored is None else stored
     _challenges.require_passphrase = args.require_passphrase
     _challenges.language = args.language
 
@@ -922,7 +964,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Threshold       : %.2f (client hanya boleh minta lebih ketat)", _verify_threshold)
     logger.info("Challenge       : %s", "wajib" if _require_challenge else "DIMATIKAN")
     logger.info("Passphrase      : %s", "wajib" if args.require_passphrase else "tidak")
-    logger.info("Password        : %s", repr(_door_password) if _door_password else "(tidak aktif)")
+    logger.info("Password        : %s", "aktif" if _door_password else "(tidak aktif)")
     logger.info("Member enrolled : %s", ", ".join(store.members) or "(belum ada)")
     logger.info("Data dir        : %s", DATA_DIR)
     logger.info("Models dir      : %s", MODELS_DIR)

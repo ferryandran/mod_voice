@@ -15,7 +15,7 @@ public class ModBlocks {
 
     /**
      * VoiceDoor - secara visual menggunakan model garage_silver_door dari Macaw's Doors
-     * (mcwdoors:block/garage_silver_door_*). Logika block entity tetap milik mod ini.
+     * (mcwdoors:block/garage/garage_silver_door_*). Logika block entity tetap milik mod ini.
      * Pastikan mod mcwdoors terpasang agar model tampil dengan benar.
      */
     public static final RegistryObject<VoiceDoorBlock> VOICE_DOOR = BLOCKS.register("voice_door",

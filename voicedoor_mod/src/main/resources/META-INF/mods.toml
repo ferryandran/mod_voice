@@ -54,12 +54,12 @@ issueTrackerURL="https://github.com/ferryandran/mod_voice/issues"
     ordering="AFTER"
     side="BOTH"
 
-# Macaw's Doors dipakai sebagai blok pintu (garage_silver_door). Ditandai mandatory=false
-# agar mod bisa dimuat tanpa Macaw's Doors, tapi pintu garage tidak akan terdaftar kalau
-# mod ini tidak ada. Di server produksi, pastikan Macaw's Doors juga terpasang.
+# Wajib: blok VoiceDoor memakai model pintu garasi silver dari Macaw's Doors
+# (blockstates/voice_door.json -> mcwdoors:block/garage/garage_silver_door_*). Tanpa mod
+# itu pintunya tampil sebagai model hilang (ungu-hitam).
 [[dependencies.voicedoor]]
     modId="mcwdoors"
-    mandatory=false
+    mandatory=true
     versionRange="[1.0.0,)"
     ordering="AFTER"
     side="BOTH"

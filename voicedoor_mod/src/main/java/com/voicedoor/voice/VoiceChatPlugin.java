@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Integrasi Simple Voice Chat: mengumpulkan audio mikrofon pemain selama satu sesi
@@ -111,7 +112,11 @@ public class VoiceChatPlugin implements VoicechatPlugin {
 
         UUID playerUUID = connection.getPlayer().getUuid();
         ActiveSession session = ACTIVE_SESSIONS.get(playerUUID);
-        if (session == null || session.finished) return;
+        if (session == null || session.finished.get()) return;
+
+        // Selama sesi rekaman, suara pemain tidak diteruskan ke pemain lain di dekatnya.
+        // Tanpa ini password yang diucapkan ke pintu terdengar semua orang lewat proximity chat.
+        event.cancel();
 
         // Paket berisi Opus terkompresi; decoder-nya stateful per stream, jadi setiap
         // sesi punya decoder sendiri dan wajib menutupnya (lihat ActiveSession.release).
@@ -161,7 +166,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
         List<UUID> expired = new ArrayList<>();
         for (Map.Entry<UUID, ActiveSession> entry : ACTIVE_SESSIONS.entrySet()) {
             ActiveSession session = entry.getValue();
-            if (session.finished) {
+            if (session.finished.get()) {
                 expired.add(entry.getKey());
                 continue;
             }
@@ -189,8 +194,10 @@ public class VoiceChatPlugin implements VoicechatPlugin {
         ServerPlayer player = session.player;
         if (player == null || player.hasDisconnected()) return;
 
+        // Thread voice chat bisa menyelesaikan sesi yang sama bersamaan; siapa pun yang
+        // menang compareAndSet yang menanganinya.
+        if (!session.finished.compareAndSet(false, true)) return;
         boolean gotSomething = session.bufferedBytes() > 0;
-        session.finished = true;
         runOnServer(session.level, () -> notifyNoUsableAudio(session, player,
                 gotSomething ? "message.voicedoor.too_little_audio" : "message.voicedoor.no_audio"));
         VoiceDoorMod.LOGGER.debug("[VoiceDoor] Sesi {} dibatalkan (buffer {} byte).",
@@ -201,9 +208,10 @@ public class VoiceChatPlugin implements VoicechatPlugin {
     // Menyelesaikan sesi
     // -----------------------------------------------------------------------
     private static void finishSession(UUID playerUUID, ActiveSession session) {
-        if (session.finished) return;
-        session.finished = true;
-        ACTIVE_SESSIONS.remove(playerUUID);
+        // Dipanggil dari thread voice chat (paket mikrofon) MAUPUN thread server (tick, tombol
+        // STOP). Check-then-set biasa membuat keduanya bisa lolos dan audio terkirim dua kali.
+        if (!session.finished.compareAndSet(false, true)) return;
+        ACTIVE_SESSIONS.remove(playerUUID, session);
 
         int bufferedBytes = session.bufferedBytes();
         if (bufferedBytes < MIN_BUFFER_BYTES) {
@@ -290,7 +298,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
         UUID uuid = player.getUUID();
         ActiveSession previous = ACTIVE_SESSIONS.remove(uuid);
         if (previous != null) {
-            previous.finished = true;
+            previous.finished.set(true);
             previous.release();
             VoiceDoorMod.LOGGER.debug("[VoiceDoor] Sesi lama {} diganti sesi baru.", uuid);
         }
@@ -320,7 +328,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
         UUID uuid = player.getUUID();
         ActiveSession previous = ACTIVE_SESSIONS.remove(uuid);
         if (previous != null) {
-            previous.finished = true;
+            previous.finished.set(true);
             previous.release();
             VoiceDoorMod.LOGGER.debug("[VoiceDoor] Sesi lama {} diganti sesi baru.", uuid);
         }
@@ -344,7 +352,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
         UUID uuid = player.getUUID();
         ActiveSession previous = ACTIVE_SESSIONS.remove(uuid);
         if (previous != null) {
-            previous.finished = true;
+            previous.finished.set(true);
             previous.release();
         }
         ActiveSession session = new ActiveSession(uuid, player, level, doorPos, true,
@@ -355,7 +363,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
 
     public static boolean hasActiveSession(UUID playerUUID) {
         ActiveSession session = ACTIVE_SESSIONS.get(playerUUID);
-        return session != null && !session.finished;
+        return session != null && !session.finished.get();
     }
 
     /**
@@ -364,7 +372,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
      */
     public static boolean stopSessionManually(UUID playerUUID) {
         ActiveSession session = ACTIVE_SESSIONS.get(playerUUID);
-        if (session != null && !session.finished) {
+        if (session != null && !session.finished.get()) {
             finishSession(playerUUID, session);
             return true;
         }
@@ -374,7 +382,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
     public static void cancelSession(UUID playerUUID) {
         ActiveSession session = ACTIVE_SESSIONS.remove(playerUUID);
         if (session != null) {
-            session.finished = true;
+            session.finished.set(true);
             session.release();
         }
     }
@@ -386,7 +394,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
     /** Buang semua sesi dan tutup decoder-nya - dipanggil saat server berhenti. */
     public static void clearAll() {
         for (ActiveSession session : ACTIVE_SESSIONS.values()) {
-            session.finished = true;
+            session.finished.set(true);
             session.release();
         }
         ACTIVE_SESSIONS.clear();
@@ -413,7 +421,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
 
         String memberName = "";
         VoiceSessionCallback callback = null;
-        volatile boolean finished = false;
+        final AtomicBoolean finished = new AtomicBoolean(false);
         int ticksAlive = 0;
         long lastAudioLevelSendTime = 0;
 
@@ -427,6 +435,9 @@ public class VoiceChatPlugin implements VoicechatPlugin {
          * jadi tidak pernah mengalokasikan decoder native sama sekali.
          */
         private OpusDecoder decoder;
+
+        /** Setelah release(), paket yang datang terlambat tidak boleh membuat decoder baru. */
+        private boolean released;
 
         ActiveSession(UUID playerUUID, ServerPlayer player, Level level, BlockPos doorPos,
                       boolean registering, String challengeId, int durationMs) {
@@ -447,7 +458,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
          * @return sample PCM, atau null kalau decoder tidak tersedia / gagal
          */
         synchronized short[] decode(byte[] opusData) {
-            if (opusData == null || opusData.length == 0) {
+            if (released || opusData == null || opusData.length == 0) {
                 return null;
             }
             VoicechatApi voicechatApi = api;
@@ -477,6 +488,7 @@ public class VoiceChatPlugin implements VoicechatPlugin {
          * kedaluwarsa, diganti sesi baru, pemain disconnect, dan server berhenti.
          */
         synchronized void release() {
+            released = true;
             if (decoder != null && !decoder.isClosed()) {
                 try {
                     decoder.close();
